@@ -1,0 +1,4133 @@
+diff -ruN --exclude=.git upstream/cmd/codexpet/combat_online_probe_windows.go arm64/cmd/codexpet/combat_online_probe_windows.go
+--- upstream/cmd/codexpet/combat_online_probe_windows.go	2026-11-10 00:37:17
++++ arm64/cmd/codexpet/combat_online_probe_windows.go	1970-01-01 08:00:00
+@@ -1,153 +0,0 @@
+-//go:build windows
+-
+-package main
+-
+-import (
+-	"context"
+-	"fmt"
+-	"math"
+-	"net"
+-	"time"
+-
+-	"codexpet/reconstruction/fightnet"
+-	"codexpet/reconstruction/play"
+-)
+-
+-type onlineCombatProbe struct {
+-	close      func()
+-	guest      *fightnet.Client
+-	rematch    bool
+-	matches    int
+-	samples    []map[string]any
+-	nextSample time.Time
+-}
+-
+-// This is enabled only by the explicit isolated performance probe flags.
+-// Both sides send ordinary client inputs to an unmodified authoritative server.
+-func (a *desktopHost) startOnlineCombatProbe() (*onlineCombatProbe, error) {
+-	u := a.prepareOnline()
+-	if u == nil {
+-		return nil, fmt.Errorf("online probe: game unavailable")
+-	}
+-	ctx, cancel := context.WithCancel(context.Background())
+-	l, err := net.Listen("tcp4", "127.0.0.1:0")
+-	if err != nil {
+-		cancel()
+-		return nil, err
+-	}
+-	s := fightnet.NewServer(fightnet.ServerConfig{})
+-	done := make(chan struct{})
+-	go func() { defer close(done); _ = s.Serve(ctx, l) }()
+-	cleanup := func() { cancel(); _ = s.Close(); <-done; s.Wait() }
+-	owner, err := fightnet.Dial(ctx, l.Addr().String())
+-	if err != nil {
+-		cleanup()
+-		return nil, err
+-	}
+-	guest, err := fightnet.Dial(ctx, l.Addr().String())
+-	if err != nil {
+-		owner.Close()
+-		cleanup()
+-		return nil, err
+-	}
+-	closeAll := func() { owner.Close(); guest.Close(); cleanup() }
+-	wait := func(c *fightnet.Client, kind string) (fightnet.Update, error) {
+-		timer := time.NewTimer(3 * time.Second)
+-		defer timer.Stop()
+-		for {
+-			select {
+-			case update := <-c.Updates():
+-				if update.Type == kind {
+-					return update, nil
+-				}
+-			case <-timer.C:
+-				return fightnet.Update{}, fmt.Errorf("online probe: waiting for %s: %v", kind, c.Error())
+-			}
+-		}
+-	}
+-	if err = owner.Send(fightnet.Message{Type: "create"}); err != nil {
+-		closeAll()
+-		return nil, err
+-	}
+-	welcome, err := wait(owner, "welcome")
+-	if err != nil {
+-		closeAll()
+-		return nil, err
+-	}
+-	if err = guest.Send(fightnet.Message{Type: "join", Room: welcome.Room}); err != nil {
+-		closeAll()
+-		return nil, err
+-	}
+-	if _, err = wait(guest, "welcome"); err != nil {
+-		closeAll()
+-		return nil, err
+-	}
+-	u.client, u.address, u.room, u.token = owner, l.Addr().String(), welcome.Room, welcome.Token
+-	u.networkState = "waiting"
+-	if err = owner.Send(fightnet.Message{Type: "ready"}); err != nil {
+-		closeAll()
+-		return nil, err
+-	}
+-	if err = guest.Send(fightnet.Message{Type: "ready"}); err != nil {
+-		closeAll()
+-		return nil, err
+-	}
+-	go func() {
+-		ticker := time.NewTicker(time.Second / 60)
+-		defer ticker.Stop()
+-		var tick uint64
+-		for {
+-			select {
+-			case <-ctx.Done():
+-				return
+-			case <-ticker.C:
+-				tick++
+-				state := guest.State()
+-				if state.State == "fighting" && state.Snapshot != nil {
+-					_ = guest.SendInput(onlineProbeInput(*state.Snapshot, 1, tick))
+-				}
+-			}
+-		}
+-	}()
+-	return &onlineCombatProbe{guest: guest, close: closeAll, nextSample: time.Now().Add(15 * time.Second)}, nil
+-}
+-
+-func onlineProbeInput(s play.CombatSnapshot, player int, tick uint64) play.Input {
+-	f, other := s.Fighters[player], s.Fighters[1-player]
+-	dx, dy := other.X-f.X, other.Y-f.Y
+-	in := play.Input{Left: dx < -210, Right: dx > 210, Up: dy < -20, Down: dy > 20}
+-	in.AttackPressed = tick%18 == 0 && math.Abs(dx) < 300
+-	in.FanPressed = tick%155 == 0
+-	in.RollPressed = tick%213 == 0
+-	in.PowerPressed = tick%301 == 0
+-	in.DodgePressed = tick%97 == 0
+-	return in
+-}
+-
+-func (a *desktopHost) sampleOnlineCombatProbe(p *onlineCombatProbe) {
+-	u := a.play.fight.upgraded
+-	if u.networkState == "over" && !p.rematch && u.client != nil {
+-		p.rematch = true
+-		p.matches++
+-		owner, guest := u.client, p.guest
+-		go func() {
+-			_ = owner.Send(fightnet.Message{Type: "rematch"})
+-			_ = guest.Send(fightnet.Message{Type: "rematch"})
+-		}()
+-	}
+-	if u.networkState == "fighting" {
+-		p.rematch = false
+-	}
+-	if time.Now().Before(p.nextSample) {
+-		return
+-	}
+-	p.nextSample = time.Now().Add(15 * time.Second)
+-	gdi, user := guiResources()
+-	errText := ""
+-	if u.client == nil {
+-		errText = "local client disconnected"
+-	} else if err := u.client.Error(); err != nil {
+-		errText = err.Error()
+-	}
+-	p.samples = append(p.samples, map[string]any{"seconds": time.Since(combatProbeData.Started).Seconds(), "tick": u.snapshot.Tick, "state": u.networkState, "gdi": gdi, "user": user, "sprites": ownedSpriteCount(a), "effects": len(a.play.effects), "skillCacheEntries": len(u.frameCache), "error": errText, "fighters": u.snapshot.Fighters})
+-}
+diff -ruN --exclude=.git upstream/cmd/codexpet/combat_probe_windows.go arm64/cmd/codexpet/combat_probe_windows.go
+--- upstream/cmd/codexpet/combat_probe_windows.go	2026-11-10 00:37:17
++++ arm64/cmd/codexpet/combat_probe_windows.go	2026-11-10 00:37:17
+@@ -17,7 +17,6 @@
+ )
+ 
+ type combatProbe struct {
+-	online                    *onlineCombatProbe
+ 	SlowFrames                int
+ 	PendingRefreshFrames      int
+ 	UnclaimedFrames           int
+@@ -77,7 +76,7 @@
+ 		return
+ 	}
+ 	p.Frames++
+-	if clock := a.play.fight.upgraded.clock; p.online != nil && clock != nil && clock.rendering {
++	if clock := a.play.fight.upgraded.clock; clock != nil && clock.rendering {
+ 		p.ClockFrames++
+ 		// Deliberately overrun the refresh interval to exercise the starvation
+ 		// fix. This delay exists only inside the explicit isolated GUI probe.
+@@ -107,14 +106,6 @@
+ 		if a.play.fight == nil {
+ 			return
+ 		}
+-		if combatOnlineSmoke {
+-			var err error
+-			p.online, err = a.startOnlineCombatProbe()
+-			if err != nil {
+-				a.stop(err)
+-				return
+-			}
+-		}
+ 		p.Started = time.Now()
+ 		p.SampledAt = p.Started
+ 		if file, err := os.Create(combatSmokeReport + ".cpu.pprof"); err == nil {
+@@ -130,9 +121,6 @@
+ 		}
+ 	}
+ 	if a.play.fight != nil {
+-		if p.online != nil {
+-			a.sampleOnlineCombatProbe(p.online)
+-		}
+ 		if !a.play.view.Still {
+ 			p.ActiveSeconds += time.Since(p.SampledAt).Seconds()
+ 		}
+@@ -158,9 +146,6 @@
+ 		}
+ 	}
+ 	target := float64(p.Cycles) * combatSmokeSeconds / 3
+-	if p.online != nil {
+-		target = combatSmokeSeconds
+-	}
+ 	if elapsed < target {
+ 		return
+ 	}
+@@ -170,7 +155,7 @@
+ 	p.GDIByCycle = append(p.GDIByCycle, gdi)
+ 	p.USERByCycle = append(p.USERByCycle, user)
+ 	p.SpriteCounts = append(p.SpriteCounts, ownedSpriteCount(a))
+-	if p.Cycles < 3 && p.online == nil {
++	if p.Cycles < 3 {
+ 		p.Cycles++
+ 		p.lastTick = 0
+ 		a.startFight()
+@@ -216,16 +201,6 @@
+ 	report["heapBytesAfterGC"] = memory.HeapAlloc
+ 	if combatLobbySmoke {
+ 		report["kind"] = "actual Windows EXE; native lobby pages and three game/lobby lifecycle cycles"
+-	}
+-	if p.online != nil {
+-		p.online.close()
+-		report["kind"] = "actual Windows GUI + two TCP clients; continuous online combat and automatic rematches"
+-		report["onlineSamples"] = p.online.samples
+-		report["completedOnlineMatches"] = p.online.matches
+-		report["injectedSlowFrames"] = p.SlowFrames
+-		report["framesWithQueuedRefreshDuringRender"] = p.PendingRefreshFrames
+-		report["framesWithReleasedClockDuringRender"] = p.UnclaimedFrames
+-		report["framesPresentedFromCombatClock"] = p.ClockFrames
+ 	}
+ 	b, _ := json.MarshalIndent(report, "", "  ")
+ 	_ = os.MkdirAll(filepath.Dir(combatSmokeReport), 0700)
+diff -ruN --exclude=.git upstream/cmd/codexpet/combat_result_windows_test.go arm64/cmd/codexpet/combat_result_windows_test.go
+--- upstream/cmd/codexpet/combat_result_windows_test.go	2026-11-10 00:37:17
++++ arm64/cmd/codexpet/combat_result_windows_test.go	1970-01-01 08:00:00
+@@ -1,121 +0,0 @@
+-//go:build windows
+-
+-package main
+-
+-import (
+-	"codexpet/reconstruction/fightnet"
+-	"codexpet/reconstruction/play"
+-	"context"
+-	"encoding/json"
+-	"net"
+-	"runtime"
+-	"testing"
+-	"time"
+-	"unsafe"
+-)
+-
+-func TestNativeOnlineResultsWithoutKOEvents(t *testing.T) {
+-	runtime.LockOSThread()
+-	defer runtime.UnlockOSThread()
+-	call(dpiContext, ^uintptr(3))
+-	t.Setenv("APPDATA", t.TempDir())
+-	t.Setenv("LOCALAPPDATA", t.TempDir())
+-	assets, err := loadAssets(bundledAssets, "runtime.json")
+-	if err != nil {
+-		t.Fatal(err)
+-	}
+-	module, _ := call(moduleHandle, 0)
+-	settings := play.DefaultGameSettings()
+-	core := play.NewCombat(false)
+-	u := newCombatPresentation(core)
+-	defer u.cancel()
+-	a := &desktopHost{assets: assets, epoch: time.Now(), dpi: 96, w: 210, h: 280, play: &playState{class: &spriteClass{module: module}, settings: playSettings{Game: &settings}, fight: &fightState{arena: core.Arena, upgraded: u}}}
+-	defer func() {
+-		if a.play.gamePanel != nil {
+-			a.play.gamePanel.close()
+-		}
+-	}()
+-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+-	if err != nil {
+-		t.Fatal(err)
+-	}
+-	defer listener.Close()
+-	updates := make(chan fightnet.Update)
+-	done := make(chan struct{})
+-	go func() {
+-		defer close(done)
+-		conn, e := listener.Accept()
+-		if e != nil {
+-			return
+-		}
+-		defer conn.Close()
+-		encoder := json.NewEncoder(conn)
+-		for update := range updates {
+-			if encoder.Encode(update) != nil {
+-				return
+-			}
+-		}
+-	}()
+-	defer func() { close(updates); listener.Close(); <-done }()
+-	client, err := fightnet.Dial(context.Background(), listener.Addr().String())
+-	if err != nil {
+-		t.Fatal(err)
+-	}
+-	defer client.Close()
+-	u.client, u.address = client, listener.Addr().String()
+-	for match, winner := range []int{0, 1, -1} {
+-		s := core.Snapshot()
+-		s.Tick = 8000
+-		s.Phase = play.Over
+-		s.Winner = winner
+-		s.Events = nil
+-		updates <- fightnet.Update{Version: fightnet.ProtocolVersion, Type: "state", Match: uint64(match + 1), Room: "ABC123", State: "over", Snapshot: &s, Connected: [2]bool{true, true}}
+-		until := time.Now().Add(2 * time.Second)
+-		for time.Now().Before(until) {
+-			a.updateCombatNetwork(time.Since(a.epoch), play.Input{})
+-			if u.resultShown && u.networkMatch == uint64(match+1) {
+-				break
+-			}
+-			time.Sleep(time.Millisecond)
+-		}
+-		label, banner := combatResult(s, 0)
+-		g := a.play.gamePanel
+-		if g == nil || !g.visible || g.skin.result != label || u.status != banner {
+-			t.Fatal("persistent final result missing", label, u.status)
+-		}
+-		// Run the messages a real application loop dispatches after ShowWindow.
+-		for n := 0; n < 128; n++ {
+-			var message messageWin
+-			if ok, _ := call(userDLL.NewProc("PeekMessageW"), uintptr(unsafe.Pointer(&message)), 0, 0, 0, 1); ok == 0 {
+-				break
+-			}
+-			if message.Message != 0x12 {
+-				call(translateMessage, uintptr(unsafe.Pointer(&message)))
+-				call(dispatchMessage, uintptr(unsafe.Pointer(&message)))
+-			}
+-		}
+-		captureLobby(t, g, "lobby-result-"+banner)
+-		g.resume()
+-		a.updateCombatNetwork(time.Since(a.epoch), play.Input{})
+-		if g.visible {
+-			t.Fatal("repeated final snapshot reopened lobby")
+-		}
+-		s.Tick = 0
+-		s.Phase = play.Ready
+-		s.Winner = -1
+-		updates <- fightnet.Update{Version: fightnet.ProtocolVersion, Type: "state", Match: uint64(match + 2), Room: "ABC123", State: "countdown", Snapshot: &s}
+-		until = time.Now().Add(time.Second)
+-		for time.Now().Before(until) {
+-			a.updateCombatNetwork(time.Since(a.epoch), play.Input{})
+-			if u.networkState == "countdown" {
+-				break
+-			}
+-			time.Sleep(time.Millisecond)
+-		}
+-		g.visible = true
+-		g.refresh()
+-		if g.skin.result != "" || u.resultShown {
+-			t.Fatal("old result survived new match")
+-		}
+-	}
+-}
+diff -ruN --exclude=.git upstream/cmd/codexpet/fight_combat_windows.go arm64/cmd/codexpet/fight_combat_windows.go
+--- upstream/cmd/codexpet/fight_combat_windows.go	2026-11-10 00:37:17
++++ arm64/cmd/codexpet/fight_combat_windows.go	2026-11-10 00:37:17
+@@ -4,49 +4,25 @@
+ 
+ import (
+ 	"context"
+-	"errors"
+ 	"fmt"
+ 	"image"
+ 	"image/draw"
+ 	"math"
+ 	"runtime"
+-	"strings"
+-	"sync"
+-	"syscall"
+ 	"time"
+ 	"unsafe"
+ 
+ 	"codexpet/reconstruction/animation"
+ 	"codexpet/reconstruction/compositor"
+-	"codexpet/reconstruction/fightnet"
+ 	"codexpet/reconstruction/play"
+ 	"codexpet/reconstruction/rig"
+ )
+ 
+ const (
+-	menuOnline       = 760
+ 	menuGameSettings = 761
+ 	menuExitFight    = 762
+-	menuReady        = 763
+-	menuRematch      = 764
+-	menuReconnect    = 765
+ )
+-
+-type dialResult struct {
+-	client *fightnet.Client
+-	err    error
+-	resume bool
+-}
+ type combatPresentation struct {
+-	lanHost                    *fightnet.LANHost
+-	lanSession                 bool
+-	reconnectUntil             time.Time
+-	networkState               string
+-	networkMatch               uint64
+-	resultShown                bool
+-	dialMu                     sync.Mutex
+-	networkInput               play.Input
+-	networkDetail              string
+ 	originalScale              float64
+ 	originalDPI                uint32
+ 	windowReduced              bool
+@@ -65,14 +41,21 @@
+ 	lastEvent                  uint64
+ 	lastRound                  int
+ 	status                     string
+-	paused, connecting         bool
+-	client                     *fightnet.Client
+-	connected                  chan dialResult
++	paused                     bool
++	pendingOnline              bool
+ 	cancel                     context.CancelFunc
+ 	context                    context.Context
++	// 联机已移除：这些字段只保留给设置页的状态文字，永远为空。
+ 	address, room, token, join string
+-	nextReconnect              time.Time
++	connecting                 bool
++	lanSession                 bool
++	networkState               string
++	networkDetail              string
++	networkMatch               uint64
++	resultShown                bool
++	networkInput               play.Input
+ 	sentAt                     time.Duration
++	reconnectUntil             time.Time
+ 	projectiles                map[uint64]*sprite
+ 	lastTrail                  uint64
+ 	frameCache                 map[string]*image.NRGBA
+@@ -83,7 +66,7 @@
+ 
+ func newCombatPresentation(c *play.Combat) *combatPresentation {
+ 	ctx, cancel := context.WithCancel(context.Background())
+-	return &combatPresentation{core: c, snapshot: c.Snapshot(), context: ctx, cancel: cancel, connected: make(chan dialResult, 1), projectiles: map[uint64]*sprite{}, frameCache: map[string]*image.NRGBA{}}
++	return &combatPresentation{core: c, snapshot: c.Snapshot(), context: ctx, cancel: cancel, projectiles: map[uint64]*sprite{}, frameCache: map[string]*image.NRGBA{}}
+ }
+ func (f *fightState) closeCombat() {
+ 	if f == nil || f.upgraded == nil {
+@@ -92,24 +75,10 @@
+ 	u := f.upgraded
+ 	u.clock.close()
+ 	u.cancel()
+-	u.lanHost.Close()
+-	u.dialMu.Lock()
+-	select {
+-	case result := <-u.connected:
+-		if result.client != nil {
+-			result.client.Close()
+-		}
+-	default:
+-	}
+-	u.dialMu.Unlock()
+ 	if u.vfx != nil {
+ 		<-u.vfx.done
+ 		u.vfx.frames = nil
+ 	}
+-	if u.client != nil {
+-		client := u.client
+-		go func() { _ = client.Send(fightnet.Message{Type: "leave"}); client.Close() }()
+-	}
+ 	for _, p := range u.projectiles {
+ 		p.close()
+ 	}
+@@ -147,30 +116,23 @@
+ 	}
+ 	p.jumpEdge, p.attackEdge = false, false
+ 	p.skillEdges = [4]bool{}
+-	if combatSmokeReport != "" && combatOnlineSmoke && u.client != nil {
+-		in = onlineProbeInput(u.snapshot, u.localPlayer, uint64(now/(time.Second/60)))
++	u.core.SetWeapon(0, p.settings.Equipped)
++	if f.auto != nil && u.core != nil {
++		u.core.SetAI(0, play.NewCombatAI(37, p.settings.Game.Difficulty))
++		f.auto = nil
+ 	}
+-	if u.address != "" {
+-		a.updateCombatNetwork(now, in)
++	if !u.paused && !held {
++		u.runner.Advance(u.core, dt, [2]play.Input{in, {}})
++	}
++	u.snapshot = u.core.Snapshot()
++	if u.paused {
++		u.status = "PAUSED"
+ 	} else {
+-		u.core.SetWeapon(0, p.settings.Equipped)
+-		if f.auto != nil && u.core != nil {
+-			u.core.SetAI(0, play.NewCombatAI(37, p.settings.Game.Difficulty))
+-			f.auto = nil
+-		}
+-		if !u.paused && !held {
+-			u.runner.Advance(u.core, dt, [2]play.Input{in, {}})
+-		}
+-		u.snapshot = u.core.Snapshot()
+-		if u.paused {
+-			u.status = "PAUSED"
+-		} else {
+-			u.status = ""
+-		}
+-		for _, e := range f.arena.Events() {
+-			a.announce(e, now)
+-		}
++		u.status = ""
+ 	}
++	for _, e := range f.arena.Events() {
++		a.announce(e, now)
++	}
+ 	if p.fight == nil {
+ 		return
+ 	}
+@@ -227,9 +189,6 @@
+ 	x, y := u.viewport.Point(local.X, local.Y)
+ 	a.placeFeet(x, y, p.view.Height, p.view.FacingRight)
+ 	drawTick := u.snapshot.Tick
+-	if u.address != "" {
+-		drawTick = uint64(now / (time.Second / 60))
+-	}
+ 	if drawTick != u.lastDrawTick || p.view.Still != p.drawn.Still || p.flash > 0 {
+ 		u.lastDrawTick = drawTick
+ 		p.seq++
+@@ -427,7 +386,7 @@
+ 		}
+ 		a.banner(text, fireBanner, now, 2300*time.Millisecond)
+ 		f.hitstop = .12
+-		if u.address == "" && e.Target == 1 {
++		if e.Target == 1 {
+ 			if drop, ok := play.RollDrop(f.rng, f.arena.Round, f.arena.Rival.Boss); ok {
+ 				dx, dy := u.viewport.Point(e.X, e.Y)
+ 				f.drops = append(f.drops, &dropState{weapon: drop, x: dx, y: dy, z: 150 * a.factor(), vz: 500 * a.factor(), born: now})
+@@ -460,273 +419,6 @@
+ 	}
+ }
+ 
+-func (a *desktopHost) beginOnline(join string) {
+-	if a.play == nil {
+-		return
+-	}
+-	a.beginOnlineAt(join, a.play.settings.Game.Server)
+-}
+-
+-func (a *desktopHost) prepareOnline() *combatPresentation {
+-	if a.play == nil {
+-		return nil
+-	}
+-	a.endFight()
+-	a.startFight()
+-	if a.play.fight == nil {
+-		return nil
+-	}
+-	f := a.play.fight
+-	u := f.upgraded
+-	core, err := play.NewConfiguredCombat(false, &u.core.Rules)
+-	if err != nil {
+-		a.endFight()
+-		a.combatStartError(err)
+-		return nil
+-	}
+-	u.core = core
+-	f.arena = u.core.Arena
+-	u.snapshot = u.core.Snapshot()
+-	return u
+-}
+-
+-func (a *desktopHost) beginOnlineAt(join, address string) {
+-	u := a.prepareOnline()
+-	if u == nil {
+-		return
+-	}
+-	u.join = join
+-	u.address = address
+-	u.status = "CONNECTING"
+-	u.networkDetail = "正在连接 " + u.address + "…"
+-	u.startDial(false)
+-	a.openGamePanel()
+-}
+-func (u *combatPresentation) startDial(resume bool) {
+-	if u.connecting {
+-		return
+-	}
+-	u.connecting = true
+-	go func() {
+-		client, err := fightnet.Dial(u.context, u.address)
+-		u.dialMu.Lock()
+-		defer u.dialMu.Unlock()
+-		if u.context.Err() != nil {
+-			if client != nil {
+-				client.Close()
+-			}
+-			return
+-		}
+-		select {
+-		case <-u.context.Done():
+-			if client != nil {
+-				client.Close()
+-			}
+-		case u.connected <- dialResult{client, err, resume}:
+-		}
+-	}()
+-}
+-func (a *desktopHost) updateCombatNetwork(now time.Duration, in play.Input) {
+-	p := a.play
+-	f := p.fight
+-	u := f.upgraded
+-	in.MergeEdges(u.networkInput)
+-	u.networkInput = in
+-	select {
+-	case result := <-u.connected:
+-		u.connecting = false
+-		if result.err != nil {
+-			u.status = "CONNECT FAILED"
+-			u.networkDetail = u.connectionError(result.err)
+-			u.nextReconnect = time.Now().Add(2 * time.Second)
+-			break
+-		}
+-		u.client = result.client
+-		u.networkDetail = "已连接，正在处理房间请求…"
+-		message := fightnet.Message{Type: "create"}
+-		if result.resume {
+-			message = fightnet.Message{Type: "resume", Room: u.room, Token: u.token}
+-		} else if u.join != "" {
+-			message = fightnet.Message{Type: "join", Room: u.join}
+-		}
+-		client := u.client
+-		go func() {
+-			if client.Send(message) != nil {
+-				client.Close()
+-			}
+-		}()
+-	default:
+-	}
+-	if u.client == nil {
+-		if !u.reconnectUntil.IsZero() && time.Now().After(u.reconnectUntil) {
+-			u.token = ""
+-			u.status = "ROOM CLOSED"
+-			u.networkDetail = "未能恢复连接，房主可能已离开。可在房间列表重新加入。"
+-			u.reconnectUntil = time.Time{}
+-		}
+-		if u.token != "" && !u.connecting && time.Now().After(u.nextReconnect) {
+-			u.startDial(true)
+-		}
+-		return
+-	}
+-	// Process at most the buffered updates per frame. Network traffic must not
+-	// keep the UI inside this loop while keyboard messages are waiting.
+-	for pending := len(u.client.Updates()); pending > 0; pending-- {
+-		select {
+-		case update := <-u.client.Updates():
+-			if update.Match > u.networkMatch {
+-				u.networkMatch = update.Match
+-				u.resultShown = false
+-				f.bannerText = ""
+-				u.lastEvent, u.lastTrail = 0, 0
+-				u.display = play.CombatSnapshot{}
+-				f.hitstop = 0
+-			}
+-			if update.Room != "" {
+-				u.room = update.Room
+-			}
+-			if update.Token != "" {
+-				u.token = update.Token
+-			}
+-			if update.Player >= 0 && update.Player < 2 {
+-				u.localPlayer = update.Player
+-			}
+-			if update.Type == "error" {
+-				u.status = update.Error
+-				u.networkDetail = combatProtocolError(update.Error)
+-				continue
+-			}
+-			if update.Type == "left" {
+-				u.token = ""
+-				u.room = ""
+-				u.networkState = "closed"
+-				u.reconnectUntil = time.Time{}
+-				u.status = "ROOM CLOSED"
+-				u.networkDetail = "房间已关闭，请重新创建或加入。"
+-				continue
+-			}
+-			if update.Type == "welcome" {
+-				u.room, u.token, u.localPlayer = update.Room, update.Token, update.Player
+-				u.reconnectUntil = time.Time{}
+-			}
+-			if update.State != "" {
+-				u.status = "ROOM " + u.room + " " + update.State
+-				u.networkDetail = ""
+-				if update.State == "fighting" && u.networkState != "fighting" && p.gamePanel != nil {
+-					p.gamePanel.resume()
+-				}
+-				u.networkState = update.State
+-			}
+-			if update.State == "countdown" {
+-				u.status = fmt.Sprintf("ROOM %s START %d", u.room, (update.Countdown+59)/60)
+-				if update.Snapshot != nil && update.Snapshot.Tick == 0 {
+-					u.lastEvent = 0
+-					u.display = play.CombatSnapshot{}
+-				}
+-			}
+-			if update.Snapshot != nil {
+-				if update.Snapshot.Rules != nil {
+-					u.core.Rules = *update.Snapshot.Rules
+-				}
+-				u.snapshot = *update.Snapshot
+-				f.arena.PetHP = update.Snapshot.Fighters[u.localPlayer].HP
+-				f.arena.FoeHP = update.Snapshot.Fighters[1-u.localPlayer].HP
+-				f.arena.Clock = update.Snapshot.Clock
+-				f.arena.Phase = update.Snapshot.Phase
+-				f.arena.Combo = update.Snapshot.Fighters[u.localPlayer].Combo
+-			}
+-		default:
+-			goto drained
+-		}
+-	}
+-drained:
+-	select {
+-	case <-u.client.Done():
+-		err := u.client.Error()
+-		u.client = nil
+-		u.status = "DISCONNECTED - RECONNECTING"
+-		u.networkDetail = u.connectionError(err)
+-		if u.token != "" {
+-			u.networkDetail = "连接已中断，正在重连。\n" + u.networkDetail
+-			if u.reconnectUntil.IsZero() {
+-				u.reconnectUntil = time.Now().Add(30 * time.Second)
+-			}
+-		}
+-		u.nextReconnect = time.Now().Add(time.Second)
+-		return
+-	default:
+-	}
+-	if u.client.State().State != "fighting" {
+-		u.networkInput.ClearEdges()
+-	} else if now-u.sentAt >= 16*time.Millisecond {
+-		u.sentAt = now
+-		if u.client.SendInput(u.networkInput) == nil {
+-			u.networkInput.ClearEdges()
+-		}
+-	}
+-	if snapshot := u.client.DisplaySnapshot(time.Now(), in); snapshot != nil {
+-		u.snapshot = *snapshot
+-	}
+-	if u.networkState == "over" {
+-		_, result := combatResult(u.snapshot, u.localPlayer)
+-		if result != "" {
+-			u.status = result
+-			if !u.resultShown {
+-				u.resultShown = true
+-				style := goldBanner
+-				if u.snapshot.Winner != u.localPlayer {
+-					style = iceBanner
+-				}
+-				a.banner(result, style, now, 3*time.Second)
+-				// Apply both final state and snapshot before the lobby first paints.
+-				a.openGamePanel()
+-			}
+-		}
+-	}
+-}
+-
+-func (u *combatPresentation) connectionError(err error) string {
+-	if u.lanSession {
+-		return "未能连接到房间。请确认房主仍在游戏中，双方在同一网络。\n房主可点“联机权限”检查当前网络；热点也可能属于公用网络。"
+-	}
+-	return combatConnectionError(err, u.address)
+-}
+-
+-func combatConnectionError(err error, address string) string {
+-	detail := "连接已关闭"
+-	if err != nil {
+-		detail = err.Error()
+-	}
+-	if errors.Is(err, syscall.Errno(10061)) || strings.Contains(detail, "10061") || strings.Contains(detail, "refused") {
+-		return "连接被拒绝：该地址没有可用的独立服务器。\n局域网联机请返回默认页面并点击创建房间。"
+-	}
+-	if strings.Contains(detail, "certificate") || strings.Contains(detail, "tls:") {
+-		return "TLS 连接失败，请检查证书及服务器域名：" + detail
+-	}
+-	if strings.Contains(detail, "protocol version mismatch") {
+-		return "服务端与客户端协议版本不一致，请使用同一发行包中的服务端。"
+-	}
+-	if strings.Contains(detail, "not a NaiWa fight server") {
+-		return "该端口不是奶蛙房间服务器，请检查服务端程序和端口。"
+-	}
+-	if strings.Contains(detail, "timeout") || strings.Contains(detail, "deadline") {
+-		return "连接超时：请核对服务器地址、端口和服务器防火墙。\n" + address
+-	}
+-	return "连接失败：" + detail
+-}
+-
+-func combatProtocolError(code string) string {
+-	translations := map[string]string{
+-		"room_not_found": "房间不存在或已关闭，请确认双方使用同一服务器和房间代码。",
+-		"room_full":      "房间已满，请创建新房间。", "version_mismatch": "协议版本不一致，请双方更新客户端和服务端。",
+-		"not_in_room": "尚未进入房间，请先创建或加入。", "invalid_resume": "重连凭证失效，请重新创建或加入房间。",
+-	}
+-	if text := translations[code]; text != "" {
+-		return text
+-	}
+-	return "服务器返回：" + code
+-}
+-
+ func (a *desktopHost) combatStartError(err error) {
+ 	_, _ = logDiagnostic(err)
+ 	a.openGamePanel()
+@@ -739,7 +431,7 @@
+ 	for _, item := range []struct {
+ 		id    uintptr
+ 		label string
+-	}{{menuOnline, "联机大厅"}, {menuGameSettings, "游戏设置"}} {
++	}{{menuGameSettings, "游戏设置"}} {
+ 		label := utf(item.label)
+ 		_, _ = call(appendMenu, parent, 0, item.id, uintptr(unsafe.Pointer(label)))
+ 		runtime.KeepAlive(label)
+@@ -753,11 +445,6 @@
+ }
+ func (a *desktopHost) combatCommand(command uintptr) bool {
+ 	switch command {
+-	case menuOnline:
+-		a.openGamePanel()
+-		if a.play.gamePanel != nil {
+-			a.play.gamePanel.switchLobbyPage(0)
+-		}
+ 	case menuGameSettings:
+ 		a.openGamePanel()
+ 		if a.play.gamePanel != nil {
+@@ -766,18 +453,6 @@
+ 	case menuExitFight:
+ 		a.endFight()
+ 		a.setControl(false)
+-	case menuReady, menuRematch:
+-		if a.play.fight != nil && a.play.fight.upgraded.client != nil {
+-			kind := "ready"
+-			if command == menuRematch {
+-				kind = "rematch"
+-			}
+-			go a.play.fight.upgraded.client.Send(fightnet.Message{Type: kind})
+-		}
+-	case menuReconnect:
+-		if a.play.fight != nil {
+-			a.play.fight.upgraded.startDial(true)
+-		}
+ 	default:
+ 		return false
+ 	}
+diff -ruN --exclude=.git upstream/cmd/codexpet/fight_lan_list_windows.go arm64/cmd/codexpet/fight_lan_list_windows.go
+--- upstream/cmd/codexpet/fight_lan_list_windows.go	2026-11-10 00:37:17
++++ arm64/cmd/codexpet/fight_lan_list_windows.go	1970-01-01 08:00:00
+@@ -1,56 +0,0 @@
+-//go:build windows
+-
+-package main
+-
+-import (
+-	"codexpet/reconstruction/fightnet"
+-	"fmt"
+-	"runtime"
+-	"strings"
+-	"unsafe"
+-)
+-
+-func (g *gamePanel) updateLANList(rooms []fightnet.LANRoom) {
+-	var keys []string
+-	for _, room := range rooms {
+-		keys = append(keys, room.Code+"/"+room.Address)
+-	}
+-	key := strings.Join(keys, "|")
+-	if key == g.roomListKey && g.listInitialized {
+-		return
+-	}
+-	selected, _ := g.selectedLANRoom()
+-	g.rooms = rooms
+-	g.roomListKey = key
+-	g.listInitialized = true
+-	_, _, _ = chatSend.Call(g.roomList, 0x0184, 0, 0)
+-	add := func(text string) {
+-		p := utf(text)
+-		_, _, _ = chatSend.Call(g.roomList, 0x0180, 0, uintptr(unsafe.Pointer(p)))
+-		runtime.KeepAlive(p)
+-	}
+-
+-	choice := 0
+-	for i, room := range rooms {
+-		add(fmt.Sprintf("房间 %s   ·   %d/2 人", room.Code, room.Players))
+-		if room.Code == selected.Code && room.Address == selected.Address {
+-			choice = i
+-		}
+-	}
+-	_, _, _ = chatSend.Call(g.roomList, 0x0186, uintptr(choice), 0)
+-	if controlText(g.code) == selected.Code {
+-		code := ""
+-		if len(rooms) > 0 {
+-			code = rooms[choice].Code
+-		}
+-		setText(g.code, code)
+-	}
+-}
+-
+-func (g *gamePanel) toggleConnectionMode() {
+-	if g.manual {
+-		g.switchLobbyPage(0)
+-	} else {
+-		g.switchLobbyPage(2)
+-	}
+-}
+diff -ruN --exclude=.git upstream/cmd/codexpet/fight_lan_permissions_windows.go arm64/cmd/codexpet/fight_lan_permissions_windows.go
+--- upstream/cmd/codexpet/fight_lan_permissions_windows.go	2026-11-10 00:37:17
++++ arm64/cmd/codexpet/fight_lan_permissions_windows.go	1970-01-01 08:00:00
+@@ -1,27 +0,0 @@
+-//go:build windows
+-
+-package main
+-
+-import (
+-	"os"
+-	"path/filepath"
+-	"runtime"
+-	"unsafe"
+-)
+-
+-// Open the Windows-owned permission UI; never add/disable firewall rules or
+-// change the network category behind the user's back. Hotspots may be Public.
+-func (g *gamePanel) openLANPermissions() {
+-	file := utf(filepath.Join(os.Getenv("SystemRoot"), "System32", "control.exe"))
+-	args := utf("/name Microsoft.WindowsFirewall /page pageConfigureApps")
+-	verb := utf("open")
+-	result, _, _ := shellExecute.Call(g.hwnd, uintptr(unsafe.Pointer(verb)), uintptr(unsafe.Pointer(file)), uintptr(unsafe.Pointer(args)), 0, 1)
+-	runtime.KeepAlive(file)
+-	runtime.KeepAlive(args)
+-	runtime.KeepAlive(verb)
+-	if result <= 32 {
+-		g.statusError = "请打开 Windows 安全中心 → 防火墙 → 允许应用。\n为当前版本奶蛙勾选当前网络；手机热点可能属于“公用”。"
+-		return
+-	}
+-	g.statusError = "房主在系统页面找到或添加当前版本 NaiWaChatPet.exe，允许当前网络。\n热点可能是“公用”；保存后让好友刷新房间，无需关闭防火墙。"
+-}
+diff -ruN --exclude=.git upstream/cmd/codexpet/fight_lan_stub_windows.go arm64/cmd/codexpet/fight_lan_stub_windows.go
+--- upstream/cmd/codexpet/fight_lan_stub_windows.go	1970-01-01 08:00:00
++++ arm64/cmd/codexpet/fight_lan_stub_windows.go	2026-11-10 00:37:17
+@@ -0,0 +1,50 @@
++//go:build windows
++
++package main
++
++// 联机功能已移除。房间列表、局域网搜索、服务器探测、断线重连都不再存在，
++// 这里只保留设置页仍然引用的空实现：任何联机动作都只会提示“已移除”。
++
++type lobbyRoom struct {
++	Code    string
++	Players int
++	Address string
++}
++
++type lanSearchResult struct {
++	rooms []lobbyRoom
++	err   error
++}
++
++const fightOnlineRemoved = "联机功能已移除，本版本只支持单机挑战"
++
++func (g *gamePanel) refreshLAN()                 {}
++func (g *gamePanel) updateLANList([]lobbyRoom)   {}
++func (g *gamePanel) startLANSearch(string, bool) {}
++func (g *gamePanel) joinLANRoom(string) {
++	g.statusError = fightOnlineRemoved
++}
++func (g *gamePanel) createLANRoom() {
++	g.statusError = fightOnlineRemoved
++}
++func (g *gamePanel) toggleConnectionMode() {}
++func (g *gamePanel) openLANPermissions()   {}
++func (g *gamePanel) startProbe(string) {
++	g.statusError = fightOnlineRemoved
++}
++func (g *gamePanel) saveServer() bool {
++	g.statusError = fightOnlineRemoved
++	return false
++}
++func (g *gamePanel) selectedLANRoom() (lobbyRoom, bool) { return lobbyRoom{}, false }
++
++func (a *desktopHost) createLANRoom()                    { a.lobbyRemovedNotice() }
++func (a *desktopHost) beginOnline(string)                { a.lobbyRemovedNotice() }
++func (a *desktopHost) lobbyRemovedNotice() {
++	if a.play != nil && a.play.gamePanel != nil {
++		a.play.gamePanel.statusError = fightOnlineRemoved
++		a.play.gamePanel.refresh()
++	}
++}
++
++func validLobbyCode(code string) bool { return false }
+diff -ruN --exclude=.git upstream/cmd/codexpet/fight_lan_windows.go arm64/cmd/codexpet/fight_lan_windows.go
+--- upstream/cmd/codexpet/fight_lan_windows.go	2026-11-10 00:37:17
++++ arm64/cmd/codexpet/fight_lan_windows.go	1970-01-01 08:00:00
+@@ -1,160 +0,0 @@
+-//go:build windows
+-
+-package main
+-
+-import (
+-	"codexpet/reconstruction/fightnet"
+-	"context"
+-	"strings"
+-	"time"
+-)
+-
+-type lanSearchResult struct {
+-	rooms    []fightnet.LANRoom
+-	err      error
+-	version  uint64
+-	joinCode string
+-	join     bool
+-}
+-
+-func validLobbyCode(code string) bool {
+-	if len(code) != 6 {
+-		return false
+-	}
+-	for _, c := range code {
+-		if !strings.ContainsRune("0123456789ABCDEF", c) {
+-			return false
+-		}
+-	}
+-	return true
+-}
+-
+-func (a *desktopHost) createLANRoom() {
+-	u := a.prepareOnline()
+-	if u == nil {
+-		return
+-	}
+-	host, err := fightnet.StartLANHost(u.context, &u.core.Rules)
+-	if err != nil {
+-		a.endFight()
+-		a.combatStartError(err)
+-		return
+-	}
+-	u.lanHost, u.lanSession = host, true
+-	u.address = host.LocalAddress()
+-	u.status = "CONNECTING"
+-	u.networkDetail = "正在创建局域网房间…"
+-	u.startDial(false)
+-	a.openGamePanel()
+-}
+-
+-func (g *gamePanel) startLANSearch(code string, join bool) {
+-	if join {
+-		g.joinAfterSearch = true
+-		g.searchJoinCode = code
+-	}
+-	if g.searching {
+-		return
+-	}
+-	g.searchVersion++
+-	version := g.searchVersion
+-	ctx, cancel := context.WithCancel(context.Background())
+-	g.searchCancel = cancel
+-	g.searching = true
+-	g.nextSearch = time.Now().Add(8 * time.Second)
+-	go func() {
+-		defer cancel()
+-		rooms, err := fightnet.DiscoverLANRooms(ctx, 2800*time.Millisecond)
+-		result := lanSearchResult{rooms: rooms, err: err, version: version, joinCode: code, join: join}
+-		select {
+-		case g.searchResults <- result:
+-		default:
+-		}
+-	}()
+-}
+-
+-func (g *gamePanel) selectedLANRoom() (fightnet.LANRoom, bool) {
+-	index, _, _ := chatSend.Call(g.roomList, 0x0188, 0, 0)
+-	if int(index) >= 0 && int(index) < len(g.rooms) {
+-		return g.rooms[int(index)], true
+-	}
+-	return fightnet.LANRoom{}, false
+-}
+-
+-func (g *gamePanel) joinLANRoom(code string, search bool) {
+-	code = strings.ToUpper(strings.TrimSpace(code))
+-	if code != "" && len(code) == 6 && !validLobbyCode(code) {
+-		g.statusError = "房间码只能包含数字与 A–F，请检查后重试。"
+-		return
+-	}
+-	if code != "" && len(code) != 6 {
+-		g.statusError = "房间码为 6 位，也可以直接在列表选择房间。"
+-		return
+-	}
+-	room, found := g.selectedLANRoom()
+-	if code != "" {
+-		found = false
+-		for _, candidate := range g.rooms {
+-			if candidate.Code == code {
+-				room, found = candidate, true
+-				break
+-			}
+-		}
+-	}
+-	if !found {
+-		if search {
+-			g.statusError = "正在查找好友的房间…"
+-			g.startLANSearch(code, true)
+-		} else {
+-			g.statusError = "广播和热点兼容搜索均未收到房间回应。\n请房主检查“联机权限”；若仍失败，热点可能禁止设备互访。"
+-		}
+-		return
+-	}
+-	g.statusError = ""
+-	if g.searchCancel != nil {
+-		g.searchCancel()
+-	}
+-	g.searchVersion++
+-	g.searching = false
+-	g.joinAfterSearch = false
+-	g.nextSearch = time.Now().Add(4 * time.Second)
+-	g.owner.beginOnlineAt(room.Code, room.Address)
+-	if g.owner.play.fight != nil {
+-		g.owner.play.fight.upgraded.lanSession = true
+-		g.owner.play.fight.upgraded.networkDetail = "正在加入局域网房间 " + room.Code + "…"
+-	}
+-}
+-
+-func (g *gamePanel) refreshLAN() {
+-	for {
+-		select {
+-		case result := <-g.searchResults:
+-			if result.version != g.searchVersion {
+-				continue
+-			}
+-			g.searching = false
+-			if g.manual {
+-				continue
+-			}
+-			if result.err != nil {
+-				g.joinAfterSearch = false
+-				g.statusError = "无法搜索局域网房间：" + result.err.Error()
+-				continue
+-			}
+-			g.updateLANList(result.rooms)
+-			if result.join || g.joinAfterSearch {
+-				code := result.joinCode
+-				if g.joinAfterSearch {
+-					code = g.searchJoinCode
+-				}
+-				g.joinAfterSearch = false
+-				g.joinLANRoom(code, false)
+-			}
+-		default:
+-			if !g.manual && (g.skin == nil || g.skin.page == 0) && g.visible && !g.searching && time.Now().After(g.nextSearch) {
+-				g.startLANSearch("", false)
+-			}
+-			return
+-		}
+-	}
+-}
+diff -ruN --exclude=.git upstream/cmd/codexpet/fight_lobby_layout_windows.go arm64/cmd/codexpet/fight_lobby_layout_windows.go
+--- upstream/cmd/codexpet/fight_lobby_layout_windows.go	2026-11-10 00:37:17
++++ arm64/cmd/codexpet/fight_lobby_layout_windows.go	2026-11-10 00:37:17
+@@ -110,9 +110,8 @@
+ 		}
+ 		return window
+ 	}
+-	button("联机", 30, 286, 34, 84, 36, 0, "nav")
+-	button("设置", 31, 386, 34, 84, 36, 0, "nav")
+-	g.manualButton = button("高级", 18, 486, 34, 84, 36, 0, "nav")
++	button("设置", 31, 286, 34, 84, 36, 0, "nav")
++	g.manualButton = button("高级", 18, 386, 34, 84, 36, 0, "nav")
+ 	button("单机挑战", 14, 674, 34, 96, 36, 0, "secondary")
+ 	button("桌宠", 16, 786, 34, 82, 36, 0, "quiet")
+ 	button("继续对战", 15, 724, 518, 144, 32, 0, "secondary")
+@@ -167,9 +166,8 @@
+ 		return fmt.Errorf("lobby frame allocation failed")
+ 	}
+ 	g.ensureAnim()
+-	g.updateLANList(nil)
+ 	g.skin.building = false
+-	g.switchLobbyPage(0)
++	g.switchLobbyPage(1)
+ 	g.startLobbyClock()
+ 	return nil
+ }
+@@ -275,10 +273,6 @@
+ 			s.result, _ = combatResult(u.snapshot, u.localPlayer)
+ 			s.winner = u.snapshot.Winner
+ 		}
+-		if u.client != nil {
+-			state := u.client.State()
+-			s.ready, s.connected, s.countdown = state.Ready, state.Connected, state.Countdown
+-		}
+ 	}
+ 	if s.bindAction != "" && g.statusError == "" {
+ 		status = "设置\u201c" + g.keyNames[s.bindAction] + "\u201d：按新键 · Esc 取消"
+@@ -363,7 +357,7 @@
+ 		}
+ 		g.updateLabel(g.keyHandles[id], label)
+ 	}
+-	key := fmt.Sprint(s.page, s.room, s.phase, s.ready, s.connected, s.localPlayer, s.countdown/60, s.connecting, g.searching, len(g.rooms), g.owner.play.settings.Game.Volume, g.owner.play.settings.Game.Effects, s.bindAction, s.result, s.winner, status)
++	key := fmt.Sprint(s.page, s.localPlayer, g.owner.play.settings.Game.Volume, g.owner.play.settings.Game.Effects, s.bindAction, s.result, s.winner, status)
+ 	if key != s.lastState {
+ 		s.lastState = key
+ 		call(skinInvalidate, g.hwnd, 0, 0)
+diff -ruN --exclude=.git upstream/cmd/codexpet/fight_lobby_stability_windows_test.go arm64/cmd/codexpet/fight_lobby_stability_windows_test.go
+--- upstream/cmd/codexpet/fight_lobby_stability_windows_test.go	2026-11-10 00:37:17
++++ arm64/cmd/codexpet/fight_lobby_stability_windows_test.go	1970-01-01 08:00:00
+@@ -1,155 +0,0 @@
+-//go:build windows
+-
+-package main
+-
+-import (
+-	"bytes"
+-	"encoding/json"
+-	"os"
+-	"path/filepath"
+-	"runtime"
+-	"testing"
+-	"time"
+-	"unsafe"
+-
+-	"codexpet/reconstruction/play"
+-)
+-
+-func TestLobbyStableFramesAndResourceLifecycle(t *testing.T) {
+-	runtime.LockOSThread()
+-	defer runtime.UnlockOSThread()
+-	t.Setenv("APPDATA", t.TempDir())
+-	t.Setenv("LOCALAPPDATA", t.TempDir())
+-	call(dpiContext, ^uintptr(3))
+-	assets, err := loadAssets(bundledAssets, "runtime.json")
+-	if err != nil {
+-		t.Fatal(err)
+-	}
+-	module, _ := call(moduleHandle, 0)
+-	settings := play.DefaultGameSettings()
+-	a := &desktopHost{assets: assets, epoch: time.Now(), dpi: 96, w: 210, h: 280, play: &playState{class: &spriteClass{module: module}, settings: playSettings{Game: &settings}}}
+-	var handles [][2]uintptr
+-	var paintMS []float64
+-	var cacheCounts []int
+-	peek := userDLL.NewProc("PeekMessageW")
+-	pump := func(g *gamePanel, duration time.Duration) {
+-		deadline := time.Now().Add(duration)
+-		for time.Now().Before(deadline) {
+-			var message messageWin
+-			for n := 0; n < 128; n++ {
+-				if ok, _ := call(peek, uintptr(unsafe.Pointer(&message)), 0, 0, 0, 1); ok == 0 {
+-					break
+-				}
+-				if message.Message != 0x12 {
+-					call(translateMessage, uintptr(unsafe.Pointer(&message)))
+-					call(dispatchMessage, uintptr(unsafe.Pointer(&message)))
+-				}
+-			}
+-			g.refresh()
+-			time.Sleep(time.Millisecond)
+-		}
+-	}
+-	for cycle := 0; cycle < 6; cycle++ {
+-
+-		a.openGamePanel()
+-
+-		g := a.play.gamePanel
+-		if g == nil || g.hwnd == 0 {
+-			t.Fatal("lobby unavailable")
+-		}
+-		if cycle == 0 {
+-			defer g.close()
+-		}
+-		if g.searchCancel != nil {
+-			g.searchCancel()
+-		}
+-		g.searchVersion++
+-		g.searching = false
+-		g.nextSearch = time.Now().Add(time.Hour)
+-		g.listInitialized = true
+-		g.refresh()
+-		pump(g, 30*time.Millisecond)
+-		if g.lobbyTimerRunning {
+-			t.Fatal("decorative timer still repaints the whole window")
+-		}
+-		grabLobby(t, g)
+-		before := append([]byte(nil), g.frame.pixels...)
+-		positions := map[uintptr]rectWin{}
+-		for _, control := range g.skin.controls {
+-			var r rectWin
+-			call(lobbyGetWindowRect, control.window, uintptr(unsafe.Pointer(&r)))
+-			positions[control.window] = r
+-		}
+-		pump(g, 260*time.Millisecond)
+-		grabLobby(t, g)
+-		// Hover and caret changes are expected; the page and control bounds stay fixed.
+-		if !bytes.Equal(before, g.frame.pixels) {
+-			t.Fatal("idle page background or text moves")
+-		}
+-		for window, expected := range positions {
+-			var r rectWin
+-			call(lobbyGetWindowRect, window, uintptr(unsafe.Pointer(&r)))
+-			if r != expected {
+-				t.Fatal("control bounds moved without input")
+-			}
+-		}
+-		start := time.Now()
+-		for n := 0; n < 10; n++ {
+-			grabLobby(t, g)
+-		}
+-		paintMS = append(paintMS, float64(time.Since(start))/float64(10*time.Millisecond))
+-
+-		// Re-entrant DPI notifications during setup must be deferred.
+-		g.skin.building = true
+-		r := rectWin{40, 40, 1000, 680}
+-		gamePanelProc(g.hwnd, wmDPIChanged, 144, uintptr(unsafe.Pointer(&r)))
+-		g.skin.building = false
+-		pump(g, 10*time.Millisecond)
+-		g.reflowLobby(96, 40, 40)
+-		pump(g, 10*time.Millisecond)
+-		for _, page := range []int{1, 2, 0} {
+-			g.switchLobbyPage(page)
+-			pump(g, 10*time.Millisecond)
+-		}
+-		frame := g.frame
+-
+-		g.reflowLobby(96, 40, 40)
+-		if frame != g.frame {
+-			t.Fatal("unchanged DPI rebuilt the frame buffer")
+-		}
+-		g.resume()
+-		pump(g, 10*time.Millisecond)
+-		gdi, user := guiResources()
+-		handles = append(handles, [2]uintptr{gdi, user})
+-		count := len(g.skin.cache) + len(g.skin.fonts) + len(g.skin.brushes)
+-		for _, layers := range g.skin.chrome {
+-			count += len(layers)
+-		}
+-		cacheCounts = append(cacheCounts, count)
+-	}
+-	// GetGuiResources also includes other test threads' OS/theme caches.
+-	// Assert only the resources this panel owns, and retain global telemetry.
+-	for _, count := range cacheCounts[1:] {
+-		if count != cacheCounts[0] {
+-			t.Fatalf("owned rendering caches grow after reopen: %v", cacheCounts)
+-		}
+-	}
+-	panel := a.play.gamePanel
+-	owned := panel.hwnd
+-	panel.close()
+-	if alive, _ := call(userDLL.NewProc("IsWindow"), owned); alive != 0 {
+-		t.Fatal("lobby survived final close")
+-	}
+-	if a.play.gamePanel != nil || panel.frame != nil || panel.skin != nil {
+-		t.Fatal("owned rendering resources survived final close")
+-	}
+-	result := map[string]any{"passed": true, "cycles": len(handles), "idlePageFramesByteIdentical": true, "controlBoundsStable": true, "gdiUserAfterHide": handles, "ownedCacheEntriesAfterHide": cacheCounts, "captureAverageMSByCycle": paintMS, "deferredDPI": true, "continuousDecorationTimer": false, "scope": "actual native window message pump; reopen/hide, page changes, DPI and final destruction"}
+-	t.Logf("native lifecycle: %v; capture costs %v ms", handles, paintMS)
+-	if output := os.Getenv("NAIWA_COMBAT_ARTIFACTS"); output != "" {
+-		os.MkdirAll(filepath.Dir(output), 0700)
+-		b, _ := json.MarshalIndent(result, "", "  ")
+-		if err := os.WriteFile(filepath.Join(filepath.Dir(output), "lobby-stability.json"), b, 0600); err != nil {
+-			t.Fatal(err)
+-		}
+-	}
+-}
+diff -ruN --exclude=.git upstream/cmd/codexpet/fight_lobby_windows_test.go arm64/cmd/codexpet/fight_lobby_windows_test.go
+--- upstream/cmd/codexpet/fight_lobby_windows_test.go	2026-11-10 00:37:17
++++ arm64/cmd/codexpet/fight_lobby_windows_test.go	1970-01-01 08:00:00
+@@ -1,241 +0,0 @@
+-//go:build windows
+-
+-package main
+-
+-import (
+-	"context"
+-	"image"
+-	"image/png"
+-	"net"
+-	"os"
+-	"path/filepath"
+-	"runtime"
+-	"testing"
+-	"time"
+-	"unsafe"
+-
+-	"codexpet/reconstruction/fightnet"
+-	"codexpet/reconstruction/play"
+-)
+-
+-// settleLobby advances the lobby animation clock so a capture shows the design
+-// in its resting state rather than mid-entrance.
+-func settleLobby(g *gamePanel) { g.refresh() }
+-
+-// grabLobby forces a synchronous repaint and copies the client area.
+-func grabLobby(t *testing.T, g *gamePanel) *image.NRGBA {
+-	t.Helper()
+-	call(userDLL.NewProc("RedrawWindow"), g.hwnd, 0, 0, 0x0001|0x0004|0x0080|0x0100)
+-	call(userDLL.NewProc("UpdateWindow"), g.hwnd)
+-	call(chatGDI.NewProc("GdiFlush"))
+-	var r rectWin
+-	call(chatGetClientRect, g.hwnd, uintptr(unsafe.Pointer(&r)))
+-	w, h := int(r.Right), int(r.Bottom)
+-	dc, _ := call(skinGetDC, g.hwnd)
+-	defer call(skinReleaseDC, g.hwnd, dc)
+-	copyDC, _ := call(skinCreateDC, dc)
+-	defer call(skinDeleteDC, copyDC)
+-	header := skinDIBHeader{Size: 40, Width: int32(w), Height: -int32(h), Planes: 1, Bits: 32}
+-	var bits uintptr
+-	bitmap, _ := call(skinCreateDIB, dc, uintptr(unsafe.Pointer(&header)), 0, uintptr(unsafe.Pointer(&bits)), 0, 0)
+-	if bitmap == 0 || bits == 0 {
+-		t.Fatal("native lobby capture failed")
+-	}
+-	defer call(chatDeleteObject, bitmap)
+-	old, _ := call(chatSelectObject, copyDC, bitmap)
+-	defer call(chatSelectObject, copyDC, old)
+-	if result, _ := call(userDLL.NewProc("PrintWindow"), g.hwnd, copyDC, 1|2); result == 0 {
+-		t.Fatal("PrintWindow client capture failed")
+-	}
+-	call(chatGDI.NewProc("GdiFlush"))
+-	pix := unsafe.Slice((*byte)(unsafe.Pointer(bits)), w*h*4)
+-	im := image.NewNRGBA(image.Rect(0, 0, w, h))
+-	for i := 0; i < len(pix); i += 4 {
+-		im.Pix[i], im.Pix[i+1], im.Pix[i+2], im.Pix[i+3] = pix[i+2], pix[i+1], pix[i], 255
+-	}
+-	return im
+-}
+-
+-// mascotPixels checks that the existing mascot is composited into the header.
+-func mascotPixels(g *gamePanel) int {
+-	g.paintRailPond(0, g.lobbyNow())
+-	if g.anim == nil {
+-		return 0
+-	}
+-	pond := g.anim.ponds["rail"]
+-	if pond == nil || pond.work == nil {
+-		return 0
+-	}
+-	pix := pond.work.Pix
+-	gold := 0
+-	for i := 0; i+3 < len(pix); i += 4 {
+-		r, gg, b := int(pix[i]), int(pix[i+1]), int(pix[i+2])
+-		if r > 185 && gg > 120 && b < 150 && r > b+60 {
+-			gold++
+-		}
+-	}
+-	return gold
+-}
+-
+-func captureLobby(t *testing.T, g *gamePanel, name string) {
+-	t.Helper()
+-	settleLobby(g)
+-	im := grabLobby(t, g)
+-	// Save first, so a failing check still leaves a picture to look at.
+-	if output := os.Getenv("NAIWA_COMBAT_ARTIFACTS"); output != "" {
+-		os.MkdirAll(output, 0700)
+-		file, err := os.Create(filepath.Join(output, name+".png"))
+-		if err != nil {
+-			t.Fatal(err)
+-		}
+-		err = png.Encode(file, im)
+-		file.Close()
+-		if err != nil {
+-			t.Fatal(err)
+-		}
+-	}
+-	// Both pages and status use the same flat canvas, without a separate card.
+-	for _, point := range []image.Point{{880, 546}, {8, 300}} {
+-		pixel := im.NRGBAAt(g.px(point.X), g.px(point.Y))
+-		if pixel.R != byte(lobbyBG>>16) || pixel.G != byte((lobbyBG>>8)&255) || pixel.B != byte(lobbyBG&255) {
+-			t.Fatal("flat lobby canvas was not painted", point, pixel)
+-		}
+-	}
+-	if gold := mascotPixels(g); gold < 100 {
+-		t.Fatal("mascot artwork missing from the header", gold)
+-	}
+-}
+-
+-func TestNativeLobbyWorkflowAndAppearance(t *testing.T) {
+-	runtime.LockOSThread()
+-	defer runtime.UnlockOSThread()
+-	t.Setenv("APPDATA", t.TempDir())
+-	t.Setenv("LOCALAPPDATA", t.TempDir())
+-	call(dpiContext, ^uintptr(3))
+-	assets, err := loadAssets(bundledAssets, "runtime.json")
+-	if err != nil {
+-		t.Fatal(err)
+-	}
+-	module, _ := call(moduleHandle, 0)
+-	settings := play.DefaultGameSettings()
+-	a := &desktopHost{assets: assets, epoch: time.Now(), dpi: 96, w: 210, h: 280, play: &playState{class: &spriteClass{module: module}, settings: playSettings{Game: &settings}}}
+-	a.openGamePanel()
+-	g := a.play.gamePanel
+-	if g == nil || g.hwnd == 0 {
+-		t.Fatal("lobby did not open")
+-	}
+-	defer g.close()
+-	stopSearch := func() {
+-		if g.searchCancel != nil {
+-			g.searchCancel()
+-		}
+-		g.searchVersion++
+-		g.searching = false
+-		g.nextSearch = time.Now().Add(time.Hour)
+-	}
+-	stopSearch()
+-	g.refresh()
+-	if enabled, _ := call(userDLL.NewProc("IsWindowEnabled"), g.skin.byID[11]); enabled != 0 {
+-		t.Fatal("empty room list leaves join enabled")
+-	}
+-	for _, control := range g.skin.controls {
+-		if control.window == 0 {
+-			t.Fatal("native control missing", control.id)
+-		}
+-	}
+-	captureLobby(t, g, "lobby-empty")
+-	g.updateLANList([]fightnet.LANRoom{{Code: "A7C204", Players: 1, Address: "127.0.0.1:28760"}, {Code: "E2941B", Players: 1, Address: "127.0.0.1:28762"}})
+-	g.refresh()
+-	if enabled, _ := call(userDLL.NewProc("IsWindowEnabled"), g.skin.byID[11]); enabled == 0 {
+-		t.Fatal("selected room cannot be joined")
+-	}
+-	captureLobby(t, g, "lobby-room-list")
+-	g.switchLobbyPage(1)
+-	g.command(105)
+-	m := messageWin{Window: g.hwnd, Message: 0x0100, WParam: 'H'}
+-	if !g.lobbyMessage(&m) || settings.Keys["attack"] != 'H' {
+-		t.Fatal("in-place key binding failed")
+-	}
+-	g.command(25)
+-	if settings.Keys["attack"] != 'J' {
+-		t.Fatal("key reset failed")
+-	}
+-	call(chatSend, g.volume, 0x0405, 1, 42)
+-	g.changeLobbySlider(g.volume, 8)
+-	if settings.Volume != .42 {
+-		t.Fatal("volume slider failed")
+-	}
+-	g.statusError = ""
+-	g.refresh()
+-	captureLobby(t, g, "lobby-settings")
+-	g.switchLobbyPage(2)
+-	captureLobby(t, g, "lobby-advanced")
+-	g.switchLobbyPage(0)
+-	stopSearch()
+-	ctx, cancel := context.WithCancel(context.Background())
+-	defer cancel()
+-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+-	if err != nil {
+-		t.Fatal(err)
+-	}
+-	server := fightnet.NewServer(fightnet.ServerConfig{})
+-	done := make(chan struct{})
+-	go func() { defer close(done); server.Serve(ctx, listener) }()
+-	defer func() { cancel(); listener.Close(); server.Close(); <-done; server.Wait() }()
+-	owner, err := fightnet.Dial(ctx, listener.Addr().String())
+-	if err != nil {
+-		t.Fatal(err)
+-	}
+-	defer owner.Close()
+-	owner.Send(fightnet.Message{Type: "create"})
+-	wait := func(client *fightnet.Client, predicate func(fightnet.Update) bool) fightnet.Update {
+-		until := time.Now().Add(2 * time.Second)
+-		for time.Now().Before(until) {
+-			u := client.State()
+-			if predicate(u) {
+-				return u
+-			}
+-			time.Sleep(5 * time.Millisecond)
+-		}
+-		t.Fatal("room state timeout")
+-		return fightnet.Update{}
+-	}
+-	state := wait(owner, func(u fightnet.Update) bool { return u.Room != "" && u.State == "waiting" })
+-	guest, err := fightnet.Dial(ctx, listener.Addr().String())
+-	if err != nil {
+-		t.Fatal(err)
+-	}
+-	defer guest.Close()
+-	guest.Send(fightnet.Message{Type: "join", Room: state.Room})
+-	wait(owner, func(u fightnet.Update) bool { return u.Connected[1] })
+-	u := newCombatPresentation(play.NewCombat(false))
+-	defer u.cancel()
+-	u.client, u.room, u.address, u.networkState = owner, state.Room, listener.Addr().String(), "waiting"
+-	a.play.fight = &fightState{upgraded: u}
+-	defer func() { a.play.fight = nil }()
+-	g.statusError = ""
+-	g.refresh()
+-	captureLobby(t, g, "lobby-connected")
+-	g.command(12)
+-	wait(owner, func(u fightnet.Update) bool { return u.Ready[0] })
+-	g.refresh()
+-	if enabled, _ := call(userDLL.NewProc("IsWindowEnabled"), g.skin.byID[12]); enabled != 0 {
+-		t.Fatal("ready button can be repeated")
+-	}
+-	captureLobby(t, g, "lobby-ready")
+-	guest.Send(fightnet.Message{Type: "ready"})
+-	state = wait(owner, func(u fightnet.Update) bool { return u.State == "countdown" })
+-	u.networkState = state.State
+-	g.refresh()
+-
+-	captureLobby(t, g, "lobby-countdown")
+-	g.reflowLobby(144, 40, 40)
+-	stopSearch()
+-	captureLobby(t, g, "lobby-scaled")
+-	hwnd := g.hwnd
+-	g.close()
+-	if valid, _ := call(userDLL.NewProc("IsWindow"), hwnd); valid != 0 {
+-		t.Fatal("lobby window leaked")
+-	}
+-	t.Log("native pages rendered; real TCP room joined and readied; binding, slider, DPI reflow and close checked")
+-}
+diff -ruN --exclude=.git upstream/cmd/codexpet/fight_panel_windows.go arm64/cmd/codexpet/fight_panel_windows.go
+--- upstream/cmd/codexpet/fight_panel_windows.go	2026-11-10 00:37:17
++++ arm64/cmd/codexpet/fight_panel_windows.go	2026-11-10 00:37:17
+@@ -6,13 +6,11 @@
+ 	"context"
+ 	"fmt"
+ 	"runtime"
+-	"strings"
+ 	"sync"
+ 	"syscall"
+ 	"time"
+ 	"unsafe"
+ 
+-	"codexpet/reconstruction/fightnet"
+ 	"codexpet/reconstruction/play"
+ )
+ 
+@@ -24,7 +22,7 @@
+ 	searchJoinCode                                          string
+ 	roomList, connectionLabel, manualButton                 uintptr
+ 	manual, visible, searching, listInitialized             bool
+-	rooms                                                   []fightnet.LANRoom
++	rooms                                                   []lobbyRoom
+ 	roomListKey                                             string
+ 	searchResults                                           chan lanSearchResult
+ 	searchCancel                                            context.CancelFunc
+@@ -250,38 +248,12 @@
+ 	g.labels[hwnd] = text
+ 	setText(hwnd, text)
+ }
+-func (g *gamePanel) saveServer() bool {
+-	s, err := fightnet.NormalizeAddress(controlText(g.server))
+-	if err != nil {
+-		g.statusError = "服务器地址格式应为 host:port 或 tls://host:port"
+-		g.refresh()
+-		return false
+-	}
+-	g.owner.play.settings.Game.Server = s
+-	g.owner.play.save()
+-	return true
+-}
+ func (g *gamePanel) command(id uintptr) {
+ 	g.statusError = ""
+ 	a, p := g.owner, g.owner.play
+ 	switch id {
+-	case 30:
+-		g.switchLobbyPage(0)
+ 	case 31:
+ 		g.switchLobbyPage(1)
+-	case 23:
+-		if p.fight != nil && p.fight.upgraded.room != "" {
+-			if err := copyChatURL(p.fight.upgraded.room); err != nil {
+-				g.statusError = "复制失败，请重试。"
+-			} else {
+-				g.statusError = "已复制房间码"
+-			}
+-		}
+-	case 24:
+-		a.endFight()
+-		a.setControl(false)
+-		g.statusError = "已离开房间"
+-		g.switchLobbyPage(0)
+ 	case 25:
+ 		p.settings.Game.Keys = play.DefaultGameSettings().Keys
+ 		p.save()
+@@ -290,47 +262,6 @@
+ 		if room, ok := g.selectedLANRoom(); ok {
+ 			setText(g.code, room.Code)
+ 		}
+-	case 10:
+-		if a.combatActive() && p.fight.upgraded.address != "" && (p.fight.upgraded.connecting || p.fight.upgraded.room != "") {
+-			g.statusError = "已在房间中，请准备"
+-			break
+-		}
+-		if !g.manual {
+-			setText(g.code, "")
+-			a.createLANRoom()
+-		} else if g.saveServer() {
+-			a.beginOnline("")
+-		}
+-	case 11:
+-		if a.combatActive() && p.fight.upgraded.address != "" && (p.fight.upgraded.connecting || p.fight.upgraded.room != "") {
+-			g.statusError = "正在连接或已在房间中，点击准备即可。"
+-			break
+-		}
+-		code := strings.ToUpper(strings.TrimSpace(controlText(g.code)))
+-		if !g.manual {
+-			if a.combatActive() && p.fight.upgraded.lanHost != nil {
+-				g.statusError = "你已创建房间，等待好友加入并准备即可。"
+-				break
+-			}
+-			g.joinLANRoom(code, true)
+-			break
+-		}
+-		if len(code) != 6 {
+-			g.statusError = "请输入 6 位房间代码。"
+-			g.refresh()
+-			return
+-		}
+-		if g.saveServer() {
+-			a.beginOnline(code)
+-		}
+-	case 12:
+-		if p.fight == nil || p.fight.upgraded.client == nil || p.fight.upgraded.room == "" {
+-			g.statusError = "请先创建或加入房间。"
+-		} else {
+-			a.combatCommand(menuReady)
+-		}
+-	case 13:
+-		a.combatCommand(menuRematch)
+ 	case 14:
+ 		a.endFight()
+ 		a.startFight()
+@@ -445,24 +376,6 @@
+ 	}
+ }
+ 
+-func (g *gamePanel) startProbe(address string) {
+-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+-	g.probeCancel = cancel
+-	g.probing = true
+-	g.statusError = "正在检测 " + address + " 的连接与协议版本…"
+-	go func() {
+-		defer cancel()
+-		result, err := fightnet.Probe(ctx, address)
+-		text := fmt.Sprintf("%s 连接成功，协议 v%d，往返 %.0fms。\n现在可以创建房间；另一位玩家使用同一地址加入房间。", address, result.Version, float64(result.RoundTrip)/float64(time.Millisecond))
+-		if err != nil {
+-			text = combatConnectionError(err, address)
+-		}
+-		select {
+-		case g.probeResults <- connectionProbeResult{text}:
+-		default:
+-		}
+-	}()
+-}
+ func gamePanelProc(hwnd uintptr, msg uint32, wparam, lparam uintptr) uintptr {
+ 	if msg == 0x0081 && lparam != 0 { // WM_NCCREATE, CREATESTRUCTW.lpCreateParams
+ 		parameter := *(*uintptr)(unsafe.Pointer(lparam))
+diff -ruN --exclude=.git upstream/cmd/codexpet/main.go arm64/cmd/codexpet/main.go
+--- upstream/cmd/codexpet/main.go	2026-11-10 00:37:17
++++ arm64/cmd/codexpet/main.go	2026-11-10 00:37:17
+@@ -1,9 +1,11 @@
+ package main
+ 
+ import (
++	"context"
+ 	"flag"
+ 	"fmt"
+ 	"io/fs"
++	"net/http"
+ 	"os"
+ 	"path/filepath"
+ 	"runtime/debug"
+@@ -26,10 +28,8 @@
+ 
+ var combatSmokeReport string
+ var combatSmokeSeconds float64
+-var combatOnlineSmoke bool
+ var combatLobbySmoke bool
+-var combatLaunch, combatCreateRoom bool
+-var combatServerAddress, combatJoinCode string
++var combatLaunch bool
+ 
+ var combatRulesPath string
+ 
+@@ -143,19 +143,39 @@
+ 	flag.BoolVar(&tidyOnLaunch, "tidy-demo", false, "start a tidy shortly after start-up")
+ 	flag.BoolVar(&fightOnLaunch, "fight-demo", false, "start an arena bout the pet fights by itself")
+ 	flag.BoolVar(&combatLaunch, "fight", false, "start an interactive single-player challenge")
+-	flag.BoolVar(&combatCreateRoom, "fight-create", false, "create an online fight room after startup")
+-	flag.StringVar(&combatJoinCode, "fight-room", "", "join a six-character online room code")
+-	flag.StringVar(&combatServerAddress, "fight-server", "", "override game server address")
+ 	flag.StringVar(&combatRulesPath, "combat-rules", "", "optional single-player combat JSON configuration; online rules are server authoritative")
+ 	flag.StringVar(&combatSkillAssets, "skill-assets", "", "optional original user skeletal directory with naiwa.json and images")
+ 	flag.StringVar(&combatSmokeReport, "combat-gui-smoke", "", "run isolated GUI performance/lifecycle probe and write JSON report")
+ 	flag.Float64Var(&combatSmokeSeconds, "combat-smoke-seconds", 30, "GUI probe duration across three game sessions")
+-	flag.BoolVar(&combatOnlineSmoke, "combat-online-smoke", false, "use two real TCP clients in the isolated GUI probe")
+ 	flag.BoolVar(&combatLobbySmoke, "combat-lobby-smoke", false, "exercise native lobby pages in the isolated GUI probe")
++	chatPing := flag.String("chat-ping", "", "send one message through the configured model endpoint and print the reply (诊断用)")
+ 	noShortcut := flag.Bool("no-shortcut", false, "leave the desktop shortcut alone, for test runs of a build outside the release folder")
+ 	flag.Parse()
+ 	if *gameVersion {
+ 		fmt.Println(play.GameBuild)
++		return nil
++	}
++	if *chatPing != "" {
++		base := strings.TrimSpace(os.Getenv("NAIWA_BASE_URL"))
++		if base == "" {
++			base = "http://127.0.0.1:8799"
++		}
++		model := strings.TrimSpace(os.Getenv("NAIWA_MODEL"))
++		if model == "" {
++			model = "hermes"
++		}
++		profile, err := companion.ModelFromSettings(companion.Settings{ModelChoice: "custom", ModelID: model, BaseURL: base})
++		if err != nil {
++			return fmt.Errorf("chat-ping: %w", err)
++		}
++		client := &companion.Client{HTTP: &http.Client{Timeout: 180 * time.Second}, Endpoint: profile.Endpoint, Attempts: 1}
++		key := strings.TrimSpace(os.Getenv("NAIWA_API_KEY"))
++		result, err := client.Complete(context.Background(), key, companion.RequestOptions{Model: profile.ID},
++			[]companion.Message{{Role: "user", Content: *chatPing}}, nil)
++		if err != nil {
++			return fmt.Errorf("chat-ping: %w", err)
++		}
++		fmt.Println(result.Text)
+ 		return nil
+ 	}
+ 	if combatSkillAssets != "" {
+diff -ruN --exclude=.git upstream/cmd/codexpet/play_windows.go arm64/cmd/codexpet/play_windows.go
+--- upstream/cmd/codexpet/play_windows.go	2026-11-10 00:37:17
++++ arm64/cmd/codexpet/play_windows.go	2026-11-10 00:37:17
+@@ -401,9 +401,7 @@
+ 				return true
+ 			}
+ 			u := p.fight.upgraded
+-			if u.client == nil && !u.connecting {
+-				u.paused = !u.paused
+-			}
++			u.paused = !u.paused
+ 			a.openGamePanel()
+ 			return true
+ 		}
+@@ -883,19 +881,10 @@
+ // stepHabits runs the things the pet does unprompted.
+ func (a *desktopHost) stepHabits(now time.Duration) {
+ 	p := a.play
+-	if combatServerAddress != "" {
+-		p.settings.Game.Server = combatServerAddress
+-		combatServerAddress = ""
++	if combatLaunch && now > 3500*time.Millisecond {
++		a.startFight()
++		combatLaunch = false
+ 	}
+-	if (combatLaunch || combatCreateRoom || combatJoinCode != "") && now > 3500*time.Millisecond {
+-		if combatCreateRoom || combatJoinCode != "" {
+-			a.beginOnline(combatJoinCode)
+-		} else {
+-			a.startFight()
+-		}
+-		combatLaunch, combatCreateRoom = false, false
+-		combatJoinCode = ""
+-	}
+ 	if combatSmokeReport != "" {
+ 		a.stepCombatProbe(now)
+ 	}
+@@ -1164,7 +1153,7 @@
+ 	if games == 0 {
+ 		return
+ 	}
+-	single := p.fight != nil && p.fight.upgraded.address == ""
++	single := p.fight != nil
+ 	label := "单机挑战"
+ 	if single {
+ 		label = "继续单机挑战"
+diff -ruN --exclude=.git upstream/cmd/codexpet/scroll_repaint_windows_test.go arm64/cmd/codexpet/scroll_repaint_windows_test.go
+--- upstream/cmd/codexpet/scroll_repaint_windows_test.go	2026-11-10 00:37:17
++++ arm64/cmd/codexpet/scroll_repaint_windows_test.go	1970-01-01 08:00:00
+@@ -1,98 +0,0 @@
+-//go:build windows
+-
+-package main
+-
+-import (
+-	"bytes"
+-	"fmt"
+-	"runtime"
+-	"strings"
+-	"testing"
+-	"unsafe"
+-)
+-
+-func captureNativeEdit(t *testing.T, hwnd uintptr) []byte {
+-	t.Helper()
+-	call(userDLL.NewProc("UpdateWindow"), hwnd)
+-	var r rectWin
+-	call(chatGetClientRect, hwnd, uintptr(unsafe.Pointer(&r)))
+-	w, h := int(r.Right-r.Left), int(r.Bottom-r.Top)
+-	dc, _ := call(skinGetDC, hwnd)
+-	defer call(skinReleaseDC, hwnd, dc)
+-	copyDC, _ := call(skinCreateDC, dc)
+-	defer call(skinDeleteDC, copyDC)
+-	header := skinDIBHeader{Size: 40, Width: int32(w), Height: -int32(h), Planes: 1, Bits: 32}
+-	var bits uintptr
+-	bitmap, e := call(skinCreateDIB, dc, uintptr(unsafe.Pointer(&header)), 0, uintptr(unsafe.Pointer(&bits)), 0, 0)
+-	if bitmap == 0 || bits == 0 {
+-		t.Fatal(e)
+-	}
+-	defer call(chatDeleteObject, bitmap)
+-	old, _ := call(chatSelectObject, copyDC, bitmap)
+-	defer call(chatSelectObject, copyDC, old)
+-	if ok, e := call(skinBitBlt, copyDC, 0, 0, uintptr(w), uintptr(h), dc, 0, 0, 0x00CC0020); ok == 0 {
+-		t.Fatal(e)
+-	}
+-	call(chatGDI.NewProc("GdiFlush"))
+-	data := append([]byte(nil), unsafe.Slice((*byte)(unsafe.Pointer(bits)), w*h*4)...)
+-	runtime.KeepAlive(header)
+-	return data
+-}
+-
+-func TestNativeInputAndReplyScrollingDoesNotAccumulateGlyphs(t *testing.T) {
+-	t.Setenv("APPDATA", t.TempDir())
+-	runtime.LockOSThread()
+-	defer runtime.UnlockOSThread()
+-	assets, e := loadAssets(bundledAssets, "runtime.json")
+-	if e != nil {
+-		t.Fatal(e)
+-	}
+-	class, title := utf("STATIC"), utf("NaiWaChatPet text repaint verification")
+-	owner, e := call(createWindow, wsExToolWindow, uintptr(unsafe.Pointer(class)), uintptr(unsafe.Pointer(title)), wsPopup, 10, 10, 153, 204, 0, 0, 0, 0)
+-	if owner == 0 {
+-		t.Fatal(e)
+-	}
+-	defer call(destroyWindow, owner)
+-	a := desktopHost{assets: assets, hwnd: owner, x: 10, y: 10, w: 153, h: 204, dpi: 96}
+-	c, e := newNativeChat(&a)
+-	if e != nil {
+-		t.Fatal(e)
+-	}
+-	defer c.Close()
+-	c.inputVisible, c.replyVisible = true, true
+-	if e = c.position(); e != nil {
+-		t.Fatal(e)
+-	}
+-	call(showWindow, c.input, 4)
+-	c.showSkin(c.input, true)
+-	call(showWindow, c.reply, 4)
+-	c.showSkin(c.reply, true)
+-	defer func() { call(showWindow, c.input, 0); call(showWindow, c.reply, 0) }()
+-	var lines []string
+-	for i := 0; i < 50; i++ {
+-		lines = append(lines, fmt.Sprintf("Line %02d: scrolling text stays clear. 奶蛙文字不重叠。", i))
+-	}
+-	text := strings.Join(lines, "\r\n")
+-	for _, row := range []struct {
+-		name   string
+-		window uintptr
+-	}{{"input", c.edit}, {"reply", c.replyText}} {
+-		setText(row.window, text)
+-		call(chatSend, row.window, 0x00B1, 0, 0)
+-		baseline := captureNativeEdit(t, row.window)
+-		for i := 0; i < 20; i++ {
+-			call(chatSend, row.window, 0x00B6, 0, 7)
+-			captureNativeEdit(t, row.window)
+-			back := -7
+-			call(chatSend, row.window, 0x00B6, 0, uintptr(back))
+-			actual := captureNativeEdit(t, row.window)
+-			if !bytes.Equal(baseline, actual) {
+-				t.Fatalf("%s scroll loop %d left stale pixels instead of restoring the identical viewport", row.name, i)
+-			}
+-		}
+-		if controlText(row.window) != text {
+-			t.Fatalf("%s scrolling changed its text", row.name)
+-		}
+-		t.Log(row.name + ": 20 down/up loops restored identical native pixels and preserved text")
+-	}
+-}
+diff -ruN --exclude=.git upstream/cmd/fightserver/main.go arm64/cmd/fightserver/main.go
+--- upstream/cmd/fightserver/main.go	2026-11-10 00:37:17
++++ arm64/cmd/fightserver/main.go	1970-01-01 08:00:00
+@@ -1,75 +0,0 @@
+-package main
+-
+-import (
+-	"context"
+-	"crypto/tls"
+-	"flag"
+-	"fmt"
+-	"net"
+-	"os"
+-	"os/signal"
+-	"syscall"
+-
+-	"codexpet/reconstruction/fightnet"
+-	"codexpet/reconstruction/play"
+-	"codexpet/reconstruction/rig"
+-)
+-
+-func main() {
+-	version := flag.Bool("version", false, "print combat build and protocol version")
+-	address := flag.String("listen", ":28760", "TCP listen address")
+-	cert := flag.String("tls-cert", "", "TLS certificate PEM")
+-	key := flag.String("tls-key", "", "TLS private key PEM")
+-	maxRooms := flag.Int("max-rooms", 128, "maximum concurrent rooms")
+-	rulesPath := flag.String("rules", "", "optional combat JSON configuration")
+-	skillPath := flag.String("skill-assets", "", "optional original skill skeleton directory")
+-	flag.Parse()
+-	if *skillPath != "" {
+-		library, e := rig.LoadSkillAnimations(os.DirFS(*skillPath), "naiwa.json")
+-		if e == nil {
+-			e = rig.RegisterSkillAnimations(library)
+-		}
+-		if e != nil {
+-			fmt.Fprintln(os.Stderr, e)
+-			os.Exit(1)
+-		}
+-	}
+-	if *version {
+-		fmt.Printf("%s protocol %d\n", play.GameBuild, fightnet.ProtocolVersion)
+-		return
+-	}
+-	var listener net.Listener
+-	var err error
+-	if *cert != "" || *key != "" {
+-		var pair tls.Certificate
+-		pair, err = tls.LoadX509KeyPair(*cert, *key)
+-		if err == nil {
+-			listener, err = tls.Listen("tcp", *address, &tls.Config{Certificates: []tls.Certificate{pair}, MinVersion: tls.VersionTLS12})
+-		}
+-	} else {
+-		listener, err = net.Listen("tcp", *address)
+-	}
+-	if err != nil {
+-		fmt.Fprintln(os.Stderr, err)
+-		os.Exit(1)
+-	}
+-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+-	defer cancel()
+-	config := fightnet.ServerConfig{MaxRooms: *maxRooms}
+-	if *rulesPath != "" {
+-		rules, e := play.ReadCombatRules(*rulesPath)
+-		if e != nil {
+-			fmt.Fprintln(os.Stderr, e)
+-			os.Exit(1)
+-		}
+-		config.Rules = &rules
+-	}
+-	server := fightnet.NewServer(config)
+-	fmt.Printf("%s listening on %s\n", server, listener.Addr())
+-	err = server.Serve(ctx, listener)
+-	server.Close()
+-	server.Wait()
+-	if err != nil && ctx.Err() == nil {
+-		fmt.Fprintln(os.Stderr, err)
+-	}
+-}
+diff -ruN --exclude=.git upstream/companion/server.go arm64/companion/server.go
+--- upstream/companion/server.go	2026-11-10 00:37:17
++++ arm64/companion/server.go	2026-11-10 00:37:17
+@@ -15,6 +15,7 @@
+ 	"net"
+ 	"net/http"
+ 	"net/url"
++	"os"
+ 	"strings"
+ 	"sync"
+ 	"time"
+@@ -243,6 +244,25 @@
+ 		s.settings.ScreenMinutes = prev.ScreenMinutes
+ 	}
+ 	s.restoreMemory()
++	// 本机桥接（奶蛙 → Hermes）：环境变量优先，脚本部署时不用点界面。
++	// NAIWA_BASE_URL=http://127.0.0.1:8799  NAIWA_MODEL=hermes  NAIWA_API_KEY=local
++	if base := strings.TrimSpace(os.Getenv("NAIWA_BASE_URL")); base != "" {
++		candidate := s.settings
++		candidate.ModelChoice = "custom"
++		candidate.ModelID = strings.TrimSpace(os.Getenv("NAIWA_MODEL"))
++		if candidate.ModelID == "" {
++			candidate.ModelID = "hermes"
++		}
++		candidate.BaseURL = base
++		candidate.Thinking = false
++		candidate.Streaming = nil
++		if profile, e := ModelFromSettings(candidate); e == nil {
++			s.settings, s.model, s.client.Endpoint = candidate, profile.ID, profile.Endpoint
++		}
++	}
++	if key := strings.TrimSpace(os.Getenv("NAIWA_API_KEY")); key != "" && s.key == "" {
++		s.key = key
++	}
+ 	s.restoreV13Preferences(prev)
+ 	mux := http.NewServeMux()
+ 	mux.HandleFunc("GET /", s.page)
+diff -ruN --exclude=.git upstream/fightnet/client.go arm64/fightnet/client.go
+--- upstream/fightnet/client.go	2026-11-10 00:37:17
++++ arm64/fightnet/client.go	1970-01-01 08:00:00
+@@ -1,272 +0,0 @@
+-package fightnet
+-
+-import (
+-	"bufio"
+-	"context"
+-	"crypto/tls"
+-	"encoding/json"
+-	"errors"
+-	"net"
+-	"strings"
+-	"sync"
+-	"time"
+-
+-	"codexpet/reconstruction/play"
+-)
+-
+-type Client struct {
+-	mu                sync.Mutex
+-	conn              net.Conn
+-	write             sync.Mutex
+-	updates           chan Update
+-	inputQueue        chan Message
+-	done              chan struct{}
+-	once              sync.Once
+-	last              Update
+-	seq, lastTick     uint64
+-	match             uint64
+-	lastEvent         uint64
+-	previous, current *play.CombatSnapshot
+-	received          time.Time
+-	Err               error
+-}
+-
+-func Dial(ctx context.Context, address string) (*Client, error) {
+-	conn, err := dialConnection(ctx, address)
+-	if err != nil {
+-		return nil, err
+-	}
+-	c := &Client{conn: conn, updates: make(chan Update, 8), done: make(chan struct{}), inputQueue: make(chan Message, 8)}
+-	go c.read()
+-	go c.writeInputs()
+-	go c.heartbeat()
+-	return c, nil
+-}
+-
+-func dialConnection(ctx context.Context, address string) (net.Conn, error) {
+-	address, err := NormalizeAddress(address)
+-	if err != nil {
+-		return nil, err
+-	}
+-	var conn net.Conn
+-	dialer := &net.Dialer{Timeout: 5 * time.Second}
+-	if strings.HasPrefix(address, "tls://") {
+-		target := strings.TrimPrefix(address, "tls://")
+-		conn, err = (&tls.Dialer{NetDialer: dialer, Config: &tls.Config{MinVersion: tls.VersionTLS12}}).DialContext(ctx, "tcp", target)
+-	} else {
+-		conn, err = dialer.DialContext(ctx, "tcp", strings.TrimPrefix(address, "tcp://"))
+-	}
+-	return conn, err
+-}
+-func (c *Client) Send(m Message) error {
+-	m.Version = ProtocolVersion
+-	c.write.Lock()
+-	defer c.write.Unlock()
+-	c.conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
+-	return json.NewEncoder(c.conn).Encode(m)
+-}
+-func (c *Client) SendInput(in play.Input) error {
+-	c.mu.Lock()
+-	c.seq++
+-	seq := c.seq
+-	c.mu.Unlock()
+-	m := Message{Type: "input", Seq: seq, Input: in}
+-	select {
+-	case <-c.done:
+-		return net.ErrClosed
+-	default:
+-	}
+-	select {
+-	case c.inputQueue <- m:
+-	default:
+-		select {
+-		case old := <-c.inputQueue:
+-			m.Input.MergeEdges(old.Input)
+-		default:
+-		}
+-		select {
+-		case c.inputQueue <- m:
+-		default:
+-		}
+-	}
+-	return nil
+-}
+-
+-func (c *Client) writeInputs() {
+-	for {
+-		select {
+-		case <-c.done:
+-			return
+-		case msg := <-c.inputQueue:
+-			// Send the newest direction after a write stall, preserving one-shot
+-			// actions without replaying a burst of obsolete movement packets.
+-			for pending := len(c.inputQueue); pending > 0; pending-- {
+-				select {
+-				case next := <-c.inputQueue:
+-					next.Input.MergeEdges(msg.Input)
+-					msg = next
+-				default:
+-					goto writeLatest
+-				}
+-			}
+-		writeLatest:
+-			if err := c.Send(msg); err != nil {
+-				c.Close()
+-				return
+-			}
+-		}
+-	}
+-}
+-func (c *Client) read() {
+-	defer c.Close()
+-	scanner := bufio.NewScanner(c.conn)
+-	scanner.Buffer(make([]byte, 4096), 128<<10)
+-	for {
+-		c.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+-		if !scanner.Scan() {
+-			c.mu.Lock()
+-			if scanner.Err() != nil {
+-				c.Err = scanner.Err()
+-			} else {
+-				c.Err = errors.New("connection closed")
+-			}
+-			c.mu.Unlock()
+-			return
+-		}
+-		var u Update
+-		if json.Unmarshal(scanner.Bytes(), &u) != nil || u.Version != ProtocolVersion {
+-			continue
+-		}
+-		if u.Type == "pong" {
+-			continue
+-		}
+-		c.mu.Lock()
+-		if u.Type == "welcome" {
+-			c.last.Room, c.last.Token, c.last.Player = u.Room, u.Token, u.Player
+-		}
+-		if u.Snapshot != nil {
+-			if u.Match != 0 && u.Match < c.match {
+-				c.mu.Unlock()
+-				continue
+-			}
+-			if u.Match > c.match || u.Match == 0 && u.State == "countdown" && u.Snapshot.Tick == 0 && c.last.State != "countdown" {
+-				c.match = u.Match
+-				c.lastTick = 0
+-				c.current = nil
+-				c.previous = nil
+-				c.lastEvent = 0
+-			}
+-			if u.Snapshot.Tick < c.lastTick {
+-				c.mu.Unlock()
+-				continue
+-			}
+-			if u.Snapshot.Tick > c.lastTick || c.current == nil {
+-				c.previous = c.current
+-				c.current = u.Snapshot
+-				c.received = time.Now()
+-			}
+-			c.lastTick = u.Snapshot.Tick
+-			if u.Player >= 0 && u.Player < 2 {
+-				c.seq = max(c.seq, u.Snapshot.Ack[u.Player])
+-			}
+-		}
+-		if u.Token == "" {
+-			u.Token = c.last.Token
+-		}
+-		if u.Room == "" {
+-			u.Room = c.last.Room
+-		}
+-		c.last = u
+-		c.mu.Unlock()
+-		select {
+-		case c.updates <- u:
+-		default:
+-			select {
+-			case <-c.updates:
+-			default:
+-			}
+-			select {
+-			case c.updates <- u:
+-			default:
+-			}
+-		}
+-	}
+-}
+-func (c *Client) heartbeat() {
+-	ticker := time.NewTicker(2 * time.Second)
+-	defer ticker.Stop()
+-	for {
+-		select {
+-		case <-c.done:
+-			return
+-		case <-ticker.C:
+-			if c.Send(Message{Type: "ping"}) != nil {
+-				c.Close()
+-				return
+-			}
+-		}
+-	}
+-}
+-func (c *Client) Updates() <-chan Update { return c.updates }
+-func (c *Client) Done() <-chan struct{}  { return c.done }
+-func (c *Client) Close() error {
+-	var err error
+-	c.once.Do(func() { close(c.done); err = c.conn.Close() })
+-	return err
+-}
+-func (c *Client) State() Update { c.mu.Lock(); defer c.mu.Unlock(); return c.last }
+-func (c *Client) Error() error  { c.mu.Lock(); defer c.mu.Unlock(); return c.Err }
+-
+-// DisplaySnapshot interpolates remote positions over one snapshot interval.
+-// A bounded local positional prediction is cosmetic; HP, MP, skills, timers
+-// and all hit outcomes always come from the server snapshot.
+-func (c *Client) DisplaySnapshot(now time.Time, local play.Input) *play.CombatSnapshot {
+-	c.mu.Lock()
+-	defer c.mu.Unlock()
+-	if c.current == nil {
+-		return nil
+-	}
+-	s := *c.current
+-	s.Projectiles = append([]play.Projectile(nil), c.current.Projectiles...)
+-	elapsed := now.Sub(c.received).Seconds()
+-	for i := range s.Fighters {
+-		f := &s.Fighters[i]
+-		advance := min(3, max(0, int(elapsed*play.CombatHz)))
+-		if f.Action.Skill != play.NoSkill {
+-			duration := 65
+-			if s.Rules != nil && len(s.Rules.Skills) >= int(f.Action.Skill) {
+-				duration = s.Rules.Skills[int(f.Action.Skill)-1].Duration
+-			}
+-			f.Action.Age = min(max(0, duration-1), f.Action.Age+advance)
+-		}
+-		if f.View.Stance && f.View.Strike > 0 {
+-			duration := .34
+-			if f.View.Power > 1 {
+-				duration = .5
+-			}
+-			f.View.Strike = min(1, f.View.Strike+min(.05, max(0, elapsed))/duration)
+-		}
+-	}
+-	alpha := min(1, max(0, elapsed/.05))
+-	if c.previous != nil && c.previous.Round == s.Round {
+-		for i := range s.Fighters {
+-			if i == c.last.Player {
+-				continue
+-			}
+-			p := c.previous.Fighters[i]
+-			f := &s.Fighters[i]
+-			if mathDistance(p.X, p.Y, f.X, f.Y) < 400*400 {
+-				f.X = p.X + (f.X-p.X)*alpha
+-				f.Y = p.Y + (f.Y-p.Y)*alpha
+-			}
+-		}
+-	}
+-	if c.last.State == "fighting" && c.last.Player >= 0 && c.last.Player < 2 {
+-		f := &s.Fighters[c.last.Player]
+-		if f.Action.Skill == play.NoSkill && s.Tick >= f.StunUntil && s.Tick >= f.HitUntil {
+-			f.X, f.Y = play.PredictCombatPosition(*f, local, elapsed)
+-		}
+-	}
+-	return &s
+-}
+-func mathDistance(x, y, a, b float64) float64 { dx, dy := x-a, y-b; return dx*dx + dy*dy }
+diff -ruN --exclude=.git upstream/fightnet/lan.go arm64/fightnet/lan.go
+--- upstream/fightnet/lan.go	2026-11-10 00:37:17
++++ arm64/fightnet/lan.go	1970-01-01 08:00:00
+@@ -1,208 +0,0 @@
+-package fightnet
+-
+-import (
+-	"context"
+-	"encoding/json"
+-	"fmt"
+-	"net"
+-	"strconv"
+-	"sync"
+-	"time"
+-
+-	"codexpet/reconstruction/play"
+-)
+-
+-const LANDiscoveryPort = 28761
+-const lanMagic = "NAIWA_FIGHT_LAN"
+-
+-type LANRoom struct {
+-	Code    string `json:"code"`
+-	Players int    `json:"players"`
+-	Address string `json:"-"`
+-}
+-
+-type lanPacket struct {
+-	Instance string   `json:"instance,omitempty"`
+-	Magic    string   `json:"magic"`
+-	Version  int      `json:"version"`
+-	Nonce    string   `json:"nonce"`
+-	Port     int      `json:"port,omitempty"`
+-	Room     *LANRoom `json:"room,omitempty"`
+-}
+-
+-// LANHost runs the same authoritative server in the pet process. TCP uses a
+-// free port; the bounded UDP responder advertises waiting rooms on the LAN.
+-type LANHost struct {
+-	instance                 string
+-	server                   *Server
+-	listener                 net.Listener
+-	discovery                *net.UDPConn
+-	directDiscovery          net.Listener
+-	cancel                   context.CancelFunc
+-	serveDone, discoveryDone chan struct{}
+-	directDone               chan struct{}
+-	once                     sync.Once
+-}
+-
+-func StartLANHost(parent context.Context, rules *play.CombatRules) (*LANHost, error) {
+-	ctx, cancel := context.WithCancel(parent)
+-	listener, err := net.Listen("tcp4", "0.0.0.0:0")
+-	if err != nil {
+-		cancel()
+-		return nil, fmt.Errorf("无法启动内置房间服务：%w", err)
+-	}
+-	discovery, err := net.ListenUDP("udp4", &net.UDPAddr{Port: LANDiscoveryPort})
+-	if err != nil {
+-		listener.Close()
+-		cancel()
+-		return nil, fmt.Errorf("局域网发现端口正被占用，请关闭另一份房主程序后重试：%w", err)
+-	}
+-	direct, err := net.Listen("tcp4", net.JoinHostPort("0.0.0.0", strconv.Itoa(LANDiscoveryPort)))
+-	if err != nil {
+-		discovery.Close()
+-		listener.Close()
+-		cancel()
+-		return nil, fmt.Errorf("热点兼容发现端口正被占用，请关闭另一份房主程序后重试：%w", err)
+-	}
+-	var ownedRules *play.CombatRules
+-	if rules != nil {
+-		copy := *rules
+-		copy.Skills = append([]play.SkillDefinition(nil), rules.Skills...)
+-		ownedRules = &copy
+-	}
+-	h := &LANHost{instance: randomID(8), server: NewServer(ServerConfig{Rules: ownedRules, MaxRooms: 1, MaxConnections: 8}), listener: listener, discovery: discovery, directDiscovery: direct, cancel: cancel, serveDone: make(chan struct{}), discoveryDone: make(chan struct{}), directDone: make(chan struct{})}
+-	go func() { defer close(h.serveDone); _ = h.server.Serve(ctx, listener) }()
+-	go func() { defer close(h.discoveryDone); h.respond(ctx) }()
+-	go func() { defer close(h.directDone); h.respondDirect(ctx) }()
+-	go func() { <-ctx.Done(); h.Close() }()
+-	return h, nil
+-}
+-
+-func (h *LANHost) LocalAddress() string {
+-	return net.JoinHostPort("127.0.0.1", strconv.Itoa(h.listener.Addr().(*net.TCPAddr).Port))
+-}
+-
+-func (h *LANHost) Close() {
+-	if h == nil {
+-		return
+-	}
+-	h.once.Do(func() {
+-		h.cancel()
+-		h.discovery.Close()
+-		h.directDiscovery.Close()
+-		h.listener.Close()
+-		h.server.Close()
+-		<-h.serveDone
+-		h.server.Wait()
+-		<-h.discoveryDone
+-		<-h.directDone
+-	})
+-}
+-
+-func validRoomCode(code string) bool {
+-	if len(code) != 6 {
+-		return false
+-	}
+-	for _, r := range code {
+-		if !(r >= '0' && r <= '9' || r >= 'A' && r <= 'F') {
+-			return false
+-		}
+-	}
+-	return true
+-}
+-
+-func localIPv4Networks() []*net.IPNet {
+-	var networks []*net.IPNet
+-	interfaces, _ := net.Interfaces()
+-	for _, iface := range interfaces {
+-		if iface.Flags&net.FlagUp == 0 {
+-			continue
+-		}
+-		addresses, _ := iface.Addrs()
+-		for _, address := range addresses {
+-			if network, ok := address.(*net.IPNet); ok && network.IP.To4() != nil && !network.IP.IsLinkLocalUnicast() {
+-				networks = append(networks, &net.IPNet{IP: network.IP.To4(), Mask: network.Mask})
+-			}
+-		}
+-	}
+-	return networks
+-}
+-
+-func onLocalNetwork(ip net.IP, networks []*net.IPNet) bool {
+-	if ip.IsLoopback() {
+-		return true
+-	}
+-	for _, network := range networks {
+-		if network.Contains(ip) {
+-			return true
+-		}
+-	}
+-	return false
+-}
+-
+-func (h *LANHost) waitingRooms() []LANRoom {
+-	h.server.mu.Lock()
+-	defer h.server.mu.Unlock()
+-	var rooms []LANRoom
+-	for _, r := range h.server.rooms {
+-		if r.state != "waiting" {
+-			continue
+-		}
+-		players := 0
+-		for _, slot := range r.slots {
+-			if slot != nil {
+-				players++
+-			}
+-		}
+-		if players < 2 {
+-			rooms = append(rooms, LANRoom{Code: r.code, Players: players})
+-		}
+-		if len(rooms) >= 8 {
+-			break
+-		}
+-	}
+-	return rooms
+-}
+-
+-func (h *LANHost) respond(ctx context.Context) {
+-	buf := make([]byte, 1025)
+-	networks := localIPv4Networks()
+-	updated := time.Now()
+-	window := time.Now()
+-	responses := 0
+-	for {
+-		n, source, err := h.discovery.ReadFromUDP(buf)
+-		if err != nil {
+-			return
+-		}
+-		if ctx.Err() != nil {
+-			return
+-		}
+-		now := time.Now()
+-		if now.Sub(updated) > 20*time.Second {
+-			networks = localIPv4Networks()
+-			updated = now
+-		}
+-		if !onLocalNetwork(source.IP, networks) || n > 1024 {
+-			continue
+-		}
+-		var request lanPacket
+-		if json.Unmarshal(buf[:n], &request) != nil || !validLANQuery(request) {
+-			continue
+-		}
+-		if now.Sub(window) >= time.Second {
+-			window = now
+-			responses = 0
+-		}
+-		for _, room := range h.waitingRooms() {
+-			if responses >= 32 {
+-				break
+-			}
+-			packet := h.advertisement(request.Nonce, room)
+-			data, _ := json.Marshal(packet)
+-			h.discovery.SetWriteDeadline(now.Add(100 * time.Millisecond))
+-			h.discovery.WriteToUDP(data, source)
+-			responses++
+-		}
+-	}
+-}
+diff -ruN --exclude=.git upstream/fightnet/lan_direct.go arm64/fightnet/lan_direct.go
+--- upstream/fightnet/lan_direct.go	2026-11-10 00:37:17
++++ arm64/fightnet/lan_direct.go	1970-01-01 08:00:00
+@@ -1,185 +0,0 @@
+-package fightnet
+-
+-import (
+-	"bufio"
+-	"context"
+-	"encoding/binary"
+-	"encoding/json"
+-	"io"
+-	"net"
+-	"strconv"
+-	"sync"
+-	"time"
+-)
+-
+-func validLANQuery(p lanPacket) bool {
+-	return p.Magic == lanMagic && p.Version == ProtocolVersion && len(p.Nonce) == 24 && p.Room == nil && p.Port == 0 && p.Instance == ""
+-}
+-
+-func (h *LANHost) advertisement(nonce string, room LANRoom) lanPacket {
+-	return lanPacket{Instance: h.instance, Magic: lanMagic, Version: ProtocolVersion, Nonce: nonce, Port: h.listener.Addr().(*net.TCPAddr).Port, Room: &room}
+-}
+-
+-// A known TCP discovery port is a second transport, independent of broadcasts.
+-// Only a small LAN-only room advertisement is served, never game/profile data.
+-func (h *LANHost) respondDirect(ctx context.Context) {
+-	var workers sync.WaitGroup
+-	defer workers.Wait()
+-	slots := make(chan struct{}, 16)
+-	networks := localIPv4Networks()
+-	updated, window := time.Now(), time.Now()
+-	accepted := 0
+-	for {
+-		conn, err := h.directDiscovery.Accept()
+-		if err != nil {
+-			return
+-		}
+-		if time.Since(updated) > 20*time.Second {
+-			networks, updated = localIPv4Networks(), time.Now()
+-		}
+-		if time.Since(window) >= time.Second {
+-			window, accepted = time.Now(), 0
+-		}
+-		if ctx.Err() != nil || !onLocalNetwork(conn.RemoteAddr().(*net.TCPAddr).IP, networks) || accepted >= 64 {
+-			conn.Close()
+-			continue
+-		}
+-		select {
+-		case slots <- struct{}{}:
+-			accepted++
+-		default:
+-			conn.Close()
+-			continue
+-		}
+-		workers.Add(1)
+-		go func() {
+-			defer workers.Done()
+-			defer func() { <-slots }()
+-			defer conn.Close()
+-			stop := context.AfterFunc(ctx, func() { conn.Close() })
+-			defer stop()
+-			conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
+-			data, err := bufio.NewReader(io.LimitReader(conn, 1025)).ReadBytes('\n')
+-			var request lanPacket
+-			if err != nil || len(data) > 1024 || json.Unmarshal(data, &request) != nil || !validLANQuery(request) {
+-				return
+-			}
+-			for _, room := range h.waitingRooms() {
+-				if json.NewEncoder(conn).Encode(h.advertisement(request.Nonce, room)) != nil {
+-					return
+-				}
+-			}
+-		}()
+-	}
+-}
+-
+-type lanProbe struct{ source, target net.IP }
+-
+-// Bound work even on a large corporate subnet or a machine with many adapters.
+-// Phone hotspots (/24 or smaller) are covered completely. Larger subnets get
+-// the local /24 and subnet gateway; they are never swept in their entirety.
+-func directDiscoveryTargets(networks []*net.IPNet) []lanProbe {
+-	var groups [][]lanProbe
+-	seen := map[string]bool{}
+-	for _, network := range networks {
+-		ip := network.IP.To4()
+-		if ip == nil || len(network.Mask) != 4 {
+-			continue
+-		}
+-		if ip.IsLoopback() {
+-			groups = append(groups, []lanProbe{{source: ip, target: net.IPv4(127, 0, 0, 1)}})
+-			continue
+-		}
+-		value, mask := binary.BigEndian.Uint32(ip), binary.BigEndian.Uint32(network.Mask)
+-		low, high := value&mask, value&mask|^mask
+-		var group []lanProbe
+-		add := func(candidate uint32) {
+-			if candidate < low || candidate > high || (high-low > 1 && (candidate == low || candidate == high)) {
+-				return
+-			}
+-			target := make(net.IP, 4)
+-			binary.BigEndian.PutUint32(target, candidate)
+-			key := ip.String() + "/" + target.String()
+-			if !seen[key] {
+-				seen[key] = true
+-				group = append(group, lanProbe{source: ip, target: target})
+-			}
+-		}
+-		add(low + 1) // The hotspot host/gateway is often also the room owner.
+-		add(value)
+-		base := value & 0xffffff00
+-		for n := uint32(1); n < 255; n++ {
+-			add(base | n)
+-		}
+-		groups = append(groups, group)
+-		if len(groups) >= 8 {
+-			break
+-		}
+-	}
+-	// Round-robin keeps VPN/virtual adapters from starving the Wi-Fi adapter.
+-	var result []lanProbe
+-	for i := 0; i < 256 && len(result) < 1024; i++ {
+-		for _, group := range groups {
+-			if i < len(group) && len(result) < 1024 {
+-				result = append(result, group[i])
+-			}
+-		}
+-	}
+-	return result
+-}
+-
+-type lanReply struct {
+-	packet lanPacket
+-	source net.IP
+-}
+-
+-func discoverDirect(ctx context.Context, networks []*net.IPNet, nonce string, replies chan<- lanReply) {
+-	targets := directDiscoveryTargets(networks)
+-	jobs := make(chan lanProbe)
+-	var workers sync.WaitGroup
+-	for i := 0; i < min(48, len(targets)); i++ {
+-		workers.Add(1)
+-		go func() {
+-			defer workers.Done()
+-			for target := range jobs {
+-				probeDirect(ctx, target, nonce, replies)
+-			}
+-		}()
+-	}
+-	defer workers.Wait()
+-	defer close(jobs)
+-	for _, target := range targets {
+-		select {
+-		case jobs <- target:
+-		case <-ctx.Done():
+-			return
+-		}
+-	}
+-}
+-
+-func probeDirect(ctx context.Context, target lanProbe, nonce string, replies chan<- lanReply) {
+-	dialer := net.Dialer{Timeout: 200 * time.Millisecond, LocalAddr: &net.TCPAddr{IP: target.source}}
+-	conn, err := dialer.DialContext(ctx, "tcp4", net.JoinHostPort(target.target.String(), strconv.Itoa(LANDiscoveryPort)))
+-	if err != nil {
+-		return
+-	}
+-	defer conn.Close()
+-	stop := context.AfterFunc(ctx, func() { conn.Close() })
+-	defer stop()
+-	conn.SetDeadline(time.Now().Add(250 * time.Millisecond))
+-	if json.NewEncoder(conn).Encode(lanPacket{Magic: lanMagic, Version: ProtocolVersion, Nonce: nonce}) != nil {
+-		return
+-	}
+-	decoder := json.NewDecoder(io.LimitReader(conn, 8192))
+-	for i := 0; i < 8; i++ {
+-		var packet lanPacket
+-		if decoder.Decode(&packet) != nil {
+-			return
+-		}
+-		select {
+-		case replies <- lanReply{packet: packet, source: target.target}:
+-		case <-ctx.Done():
+-			return
+-		}
+-	}
+-}
+diff -ruN --exclude=.git upstream/fightnet/lan_discover.go arm64/fightnet/lan_discover.go
+--- upstream/fightnet/lan_discover.go	2026-11-10 00:37:17
++++ arm64/fightnet/lan_discover.go	1970-01-01 08:00:00
+@@ -1,140 +0,0 @@
+-package fightnet
+-
+-import (
+-	"context"
+-	"encoding/json"
+-	"net"
+-	"sort"
+-	"strconv"
+-	"strings"
+-	"sync"
+-	"time"
+-)
+-
+-// DiscoverLANRooms uses interface-bound broadcasts and bounded TCP discovery.
+-// The second transport also works when a hotspot drops broadcast datagrams.
+-func DiscoverLANRooms(parent context.Context, duration time.Duration) ([]LANRoom, error) {
+-	return discoverLANRooms(parent, duration, localIPv4Networks(), true)
+-}
+-
+-func discoverLANRooms(parent context.Context, duration time.Duration, networks []*net.IPNet, broadcast bool) ([]LANRoom, error) {
+-	if duration <= 0 || duration > 5*time.Second {
+-		duration = 2800 * time.Millisecond
+-	}
+-	ctx, cancel := context.WithTimeout(parent, duration)
+-	nonce := randomID(12)
+-	replies := make(chan lanReply, 128)
+-	var workers sync.WaitGroup
+-	defer workers.Wait()
+-	// Cancel before waiting, including early result-limit/caller-cancellation exits.
+-	defer cancel()
+-	if broadcast {
+-		for _, network := range networks {
+-			workers.Add(1)
+-			go func() {
+-				defer workers.Done()
+-				discoverBroadcast(ctx, network, nonce, replies)
+-			}()
+-		}
+-	}
+-	workers.Add(1)
+-	go func() {
+-		defer workers.Done()
+-		discoverDirect(ctx, networks, nonce, replies)
+-	}()
+-	found := map[string]LANRoom{}
+-	for {
+-		select {
+-		case <-ctx.Done():
+-			if parent.Err() != nil {
+-				return nil, parent.Err()
+-			}
+-			return sortedLANRooms(found), nil
+-		case result := <-replies:
+-			reply, source := result.packet, result.source
+-			if !onLocalNetwork(source, networks) || reply.Magic != lanMagic || reply.Version != ProtocolVersion || reply.Nonce != nonce || len(reply.Instance) != 16 || reply.Room == nil || reply.Port < 1 || reply.Port > 65535 {
+-				continue
+-			}
+-			room := *reply.Room
+-			room.Code = strings.ToUpper(room.Code)
+-			if !validRoomCode(room.Code) || room.Players < 0 || room.Players >= 2 {
+-				continue
+-			}
+-			room.Address = net.JoinHostPort(source.String(), strconv.Itoa(reply.Port))
+-			key := reply.Instance + "/" + room.Code
+-			if _, ok := found[key]; !ok || !source.IsLoopback() {
+-				found[key] = room
+-			}
+-			if len(found) >= 64 {
+-				return sortedLANRooms(found), nil
+-			}
+-		}
+-	}
+-}
+-
+-func sortedLANRooms(found map[string]LANRoom) []LANRoom {
+-	rooms := make([]LANRoom, 0, len(found))
+-	for _, room := range found {
+-		rooms = append(rooms, room)
+-	}
+-	sort.Slice(rooms, func(i, j int) bool {
+-		if rooms[i].Code == rooms[j].Code {
+-			return rooms[i].Address < rooms[j].Address
+-		}
+-		return rooms[i].Code < rooms[j].Code
+-	})
+-	return rooms
+-}
+-
+-func discoverBroadcast(ctx context.Context, network *net.IPNet, nonce string, replies chan<- lanReply) {
+-	ip := network.IP.To4()
+-	if ip == nil || len(network.Mask) != 4 {
+-		return
+-	}
+-	// Binding the sender fixes Windows choosing the VPN/default adapter for
+-	// wildcard broadcast sockets. Replies return to that same physical interface.
+-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: ip})
+-	if err != nil {
+-		return // TCP discovery remains available when UDP is unavailable.
+-	}
+-	defer conn.Close()
+-	stop := context.AfterFunc(ctx, func() { conn.Close() })
+-	defer stop()
+-	broadcast := make(net.IP, 4)
+-	for i := range broadcast {
+-		broadcast[i] = ip[i] | ^network.Mask[i]
+-	}
+-	targets := []net.IP{broadcast, net.IPv4bcast}
+-	if ip.IsLoopback() {
+-		targets = []net.IP{ip}
+-	}
+-	query, _ := json.Marshal(lanPacket{Magic: lanMagic, Version: ProtocolVersion, Nonce: nonce})
+-	nextSend := time.Time{}
+-	buf := make([]byte, 1025)
+-	for ctx.Err() == nil {
+-		if !time.Now().Before(nextSend) {
+-			for _, target := range targets {
+-				conn.SetWriteDeadline(time.Now().Add(50 * time.Millisecond))
+-				conn.WriteToUDP(query, &net.UDPAddr{IP: target, Port: LANDiscoveryPort})
+-			}
+-			nextSend = time.Now().Add(350 * time.Millisecond)
+-		}
+-		conn.SetReadDeadline(time.Now().Add(80 * time.Millisecond))
+-		n, source, err := conn.ReadFromUDP(buf)
+-		if err != nil {
+-			if e, ok := err.(net.Error); ok && e.Timeout() {
+-				continue
+-			}
+-			return
+-		}
+-		var packet lanPacket
+-		if n > 1024 || json.Unmarshal(buf[:n], &packet) != nil {
+-			continue
+-		}
+-		select {
+-		case replies <- lanReply{packet: packet, source: source.IP}:
+-		case <-ctx.Done():
+-			return
+-		}
+-	}
+-}
+diff -ruN --exclude=.git upstream/fightnet/lan_test.go arm64/fightnet/lan_test.go
+--- upstream/fightnet/lan_test.go	2026-11-10 00:37:17
++++ arm64/fightnet/lan_test.go	1970-01-01 08:00:00
+@@ -1,129 +0,0 @@
+-package fightnet
+-
+-import (
+-	"context"
+-	"net"
+-	"testing"
+-	"time"
+-)
+-
+-func TestLANCreateDiscoverAndJoinWithoutAddress(t *testing.T) {
+-	host, err := StartLANHost(context.Background(), nil)
+-	if err != nil {
+-		t.Fatal(err)
+-	}
+-	defer host.Close()
+-	owner := testClient(t, host.LocalAddress())
+-	owner.Send(Message{Type: "create"})
+-	welcome := waitUpdate(t, owner, func(u Update) bool { return u.Type == "welcome" })
+-	rooms, err := DiscoverLANRooms(context.Background(), 650*time.Millisecond)
+-	if err != nil {
+-		t.Fatal(err)
+-	}
+-	var found *LANRoom
+-	for i := range rooms {
+-		if rooms[i].Code == welcome.Room {
+-			found = &rooms[i]
+-			break
+-		}
+-	}
+-	if found == nil {
+-		t.Fatal("room not automatically discovered", rooms)
+-	}
+-	guest := testClient(t, found.Address)
+-	guest.Send(Message{Type: "join", Room: found.Code})
+-	joined := waitUpdate(t, guest, func(u Update) bool { return u.Type == "welcome" })
+-	if joined.Room != welcome.Room || joined.Player != 1 {
+-		t.Fatal("guest joined wrong room")
+-	}
+-	owner.Send(Message{Type: "ready"})
+-	guest.Send(Message{Type: "ready"})
+-	waitUpdate(t, guest, func(u Update) bool { return u.State == "countdown" })
+-	host.Close()
+-	select {
+-	case <-guest.Done():
+-	case <-time.After(time.Second):
+-		t.Fatal("host exit left guest connection open")
+-	}
+-}
+-
+-// Do not let 127.0.0.1 or UDP make this test pass. Exercise the hotspot
+-// fallback over a real adapter's IPv4 address, then join its advertised room.
+-func TestLANHotspotFallbackWithoutBroadcastOrLoopback(t *testing.T) {
+-	var networks []*net.IPNet
+-	for _, network := range localIPv4Networks() {
+-		if network.IP.IsPrivate() && !network.IP.IsLoopback() {
+-			networks = append(networks, network)
+-			break
+-		}
+-	}
+-	if len(networks) == 0 {
+-		t.Skip("no active private IPv4 adapter; physical-adapter fallback cannot be checked")
+-	}
+-	host, err := StartLANHost(context.Background(), nil)
+-	if err != nil {
+-		t.Fatal(err)
+-	}
+-	defer host.Close()
+-	owner := testClient(t, host.LocalAddress())
+-	owner.Send(Message{Type: "create"})
+-	welcome := waitUpdate(t, owner, func(u Update) bool { return u.Type == "welcome" })
+-	rooms, err := discoverLANRooms(context.Background(), 900*time.Millisecond, networks, false)
+-	if err != nil {
+-		t.Fatal(err)
+-	}
+-	if len(rooms) != 1 || rooms[0].Code != welcome.Room {
+-		t.Fatalf("TCP-only discovery failed: %v", rooms)
+-	}
+-	ip, _, err := net.SplitHostPort(rooms[0].Address)
+-	if err != nil || !net.ParseIP(ip).Equal(networks[0].IP) {
+-		t.Fatal("discovery did not use the selected real interface")
+-	}
+-	guest := testClient(t, rooms[0].Address)
+-	guest.Send(Message{Type: "join", Room: rooms[0].Code})
+-	joined := waitUpdate(t, guest, func(u Update) bool { return u.Type == "welcome" })
+-	if joined.Player != 1 || joined.Room != welcome.Room {
+-		t.Fatal("TCP-discovered room could not be joined")
+-	}
+-	ctx, cancel := context.WithCancel(context.Background())
+-	cancel()
+-	if _, err := discoverLANRooms(ctx, time.Second, networks, false); err != context.Canceled {
+-		t.Fatal("discovery did not honor cancellation", err)
+-	}
+-}
+-
+-func TestLANProbeTargetsAreBoundedAndUseEachInterface(t *testing.T) {
+-	var networks []*net.IPNet
+-	for _, value := range []string{"192.168.43.71/24", "172.20.10.3/28", "10.23.45.67/16"} {
+-		ip, network, _ := net.ParseCIDR(value)
+-		network.IP = ip.To4()
+-		networks = append(networks, network)
+-	}
+-	seen := map[string]bool{}
+-	targets := directDiscoveryTargets(networks)
+-	if len(targets) > 1024 {
+-		t.Fatal("unbounded subnet scan")
+-	}
+-	for _, target := range targets {
+-		seen[target.source.String()+"/"+target.target.String()] = true
+-		valid := false
+-		for _, network := range networks {
+-			if network.IP.Equal(target.source) && network.Contains(target.target) {
+-				valid = true
+-			}
+-		}
+-		if !valid {
+-			t.Fatal("probe escaped its selected local subnet", target)
+-		}
+-	}
+-	for last := 1; last < 255; last++ {
+-		if !seen["192.168.43.71/"+net.IPv4(192, 168, 43, byte(last)).String()] {
+-			t.Fatal("hotspot peer omitted", last)
+-		}
+-	}
+-	for _, gateway := range []string{"192.168.43.71/192.168.43.1", "172.20.10.3/172.20.10.1", "10.23.45.67/10.23.0.1"} {
+-		if !seen[gateway] {
+-			t.Fatal("hotspot/subnet gateway omitted", gateway)
+-		}
+-	}
+-}
+diff -ruN --exclude=.git upstream/fightnet/network_test.go arm64/fightnet/network_test.go
+--- upstream/fightnet/network_test.go	2026-11-10 00:37:17
++++ arm64/fightnet/network_test.go	1970-01-01 08:00:00
+@@ -1,335 +0,0 @@
+-package fightnet
+-
+-import (
+-	"bufio"
+-	"context"
+-	"encoding/json"
+-	"fmt"
+-	"math/rand"
+-	"net"
+-	"strings"
+-	"testing"
+-	"time"
+-
+-	"codexpet/reconstruction/play"
+-)
+-
+-func testServer(t *testing.T) (*Server, string) {
+-	t.Helper()
+-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+-	if err != nil {
+-		t.Fatal(err)
+-	}
+-	ctx, cancel := context.WithCancel(context.Background())
+-	s := NewServer(ServerConfig{ManualTicks: true})
+-	done := make(chan struct{})
+-	go func() { defer close(done); _ = s.Serve(ctx, listener) }()
+-	t.Cleanup(func() { cancel(); s.Close(); <-done; s.Wait() })
+-	return s, listener.Addr().String()
+-}
+-func testClient(t *testing.T, address string) *Client {
+-	t.Helper()
+-	c, e := Dial(context.Background(), address)
+-	if e != nil {
+-		t.Fatal(e)
+-	}
+-	t.Cleanup(func() { c.Close() })
+-	return c
+-}
+-
+-func TestConnectionProbeDoesNotCreateRooms(t *testing.T) {
+-	s, address := testServer(t)
+-	result, err := Probe(context.Background(), address)
+-	if err != nil || result.Version != ProtocolVersion {
+-		t.Fatalf("probe: %+v %v", result, err)
+-	}
+-	s.mu.Lock()
+-	rooms := len(s.rooms)
+-	s.mu.Unlock()
+-	if rooms != 0 {
+-		t.Fatal("connection check created a room")
+-	}
+-	ctx, cancel := context.WithCancel(context.Background())
+-	cancel()
+-	if _, err := Probe(ctx, address); err == nil {
+-		t.Fatal("canceled probe succeeded")
+-	}
+-}
+-func waitUpdate(t *testing.T, c *Client, predicate func(Update) bool) Update {
+-	t.Helper()
+-	timeout := time.NewTimer(3 * time.Second)
+-	defer timeout.Stop()
+-	for {
+-		select {
+-		case u := <-c.Updates():
+-			if predicate(u) {
+-				return u
+-			}
+-		case <-timeout.C:
+-			t.Fatalf("update timed out; last=%+v err=%v", c.State(), c.Error())
+-			return Update{}
+-		}
+-	}
+-}
+-func createPair(t *testing.T, s *Server, address string) (*Client, *Client, string, string) {
+-	a, b := testClient(t, address), testClient(t, address)
+-	if e := a.Send(Message{Type: "create"}); e != nil {
+-		t.Fatal(e)
+-	}
+-	u := waitUpdate(t, a, func(u Update) bool { return u.Type == "welcome" })
+-	b.Send(Message{Type: "join", Room: u.Room})
+-	waitUpdate(t, b, func(u Update) bool { return u.Type == "welcome" })
+-	a.Send(Message{Type: "ready"})
+-	b.Send(Message{Type: "ready"})
+-	waitUpdate(t, a, func(u Update) bool { return u.State == "countdown" })
+-	for n := 0; n < 183; n++ {
+-		s.Tick(time.Now())
+-	}
+-	waitUpdate(t, a, func(u Update) bool { return u.State == "fighting" })
+-	waitUpdate(t, b, func(u Update) bool { return u.State == "fighting" })
+-	return a, b, u.Room, u.Token
+-}
+-func TestTwoTCPClientsRoomsAuthorityReconnectAndRematch(t *testing.T) {
+-	s, address := testServer(t)
+-	a, b, code, token := createPair(t, s, address)
+-	a.SendInput(play.Input{PowerPressed: true})
+-	b.SendInput(play.Input{FanPressed: true})
+-	deadline := time.Now().Add(time.Second)
+-	for time.Now().Before(deadline) {
+-		s.mu.Lock()
+-		r := s.rooms[code]
+-		ready := r.slots[0].seq > 0 && r.slots[1].seq > 0
+-		s.mu.Unlock()
+-		if ready {
+-			break
+-		}
+-		time.Sleep(time.Millisecond)
+-	}
+-	for n := 0; n < 90; n++ {
+-		s.Tick(time.Now())
+-	}
+-	u := waitUpdate(t, a, func(u Update) bool { return u.Snapshot != nil && u.Snapshot.Tick >= 90 })
+-	v := waitUpdate(t, b, func(u Update) bool {
+-		return u.Snapshot != nil && u.Snapshot.Tick == u.Snapshot.Tick && u.Snapshot.Tick >= 90
+-	})
+-	if u.Snapshot.Fighters[0].BuffStacks != 1 {
+-		t.Fatal("power not synchronized")
+-	}
+-	if v.Snapshot.Fighters[0].BuffStacks != 1 {
+-		t.Fatal("other client disagrees")
+-	}
+-	// A forged HP/damage field is rejected by the wire decoder.
+-	raw, e := net.Dial("tcp", address)
+-	if e != nil {
+-		t.Fatal(e)
+-	}
+-	defer raw.Close()
+-	fmt.Fprintf(raw, "{\"version\":1,\"type\":\"damage\",\"hp\":99999}\n")
+-	raw.SetReadDeadline(time.Now().Add(time.Second))
+-	line, _ := bufio.NewReader(raw).ReadString('\n')
+-	if !strings.Contains(line, "invalid_message") {
+-		t.Fatalf("forged packet accepted %s", line)
+-	}
+-	a.Close()
+-	waitUpdate(t, b, func(u Update) bool { return u.State == "disconnected" })
+-	resumed := testClient(t, address)
+-	resumed.Send(Message{Type: "resume", Room: code, Token: token})
+-	waitUpdate(t, resumed, func(u Update) bool { return u.Type == "welcome" })
+-	waitUpdate(t, b, func(u Update) bool { return u.State == "fighting" })
+-	// Duplicate and reordered sequences must not spend mana again.
+-	s.mu.Lock()
+-	slot := s.rooms[code].slots[0]
+-	seq := slot.seq
+-	before := s.rooms[code].combat.Fighters[0].MP
+-	s.mu.Unlock()
+-	resumed.Send(Message{Type: "input", Seq: seq, Input: play.Input{PowerPressed: true}})
+-	for n := 0; n < 3; n++ {
+-		s.Tick(time.Now())
+-	}
+-	s.mu.Lock()
+-	after := s.rooms[code].combat.Fighters[0].MP
+-	s.mu.Unlock()
+-	if after+1e-7 < before {
+-		t.Fatal("duplicate input spent mana")
+-	}
+-	// End the authoritative match and exercise a real rematch exchange.
+-	s.mu.Lock()
+-	r := s.rooms[code]
+-	r.combat.Arena.Clock = play.CombatDT
+-	r.combat.Fighters[0].BuffStacks = 4
+-	s.mu.Unlock()
+-	for n := 0; n < 170; n++ {
+-		s.Tick(time.Now())
+-	}
+-	waitUpdate(t, b, func(u Update) bool { return u.State == "over" })
+-	resumed.Send(Message{Type: "rematch"})
+-	b.Send(Message{Type: "rematch"})
+-	waitUpdate(t, b, func(u Update) bool { return u.State == "countdown" })
+-	s.mu.Lock()
+-	stacks := s.rooms[code].combat.Fighters[0].BuffStacks
+-	s.mu.Unlock()
+-	if stacks != 0 {
+-		t.Fatal("buff crossed complete new match")
+-	}
+-	resumed.Send(Message{Type: "leave"})
+-	waitUpdate(t, b, func(u Update) bool { return u.Type == "left" })
+-	if s.RoomCount() != 0 {
+-		t.Fatal("room leak")
+-	}
+-}
+-
+-// This TCP message proxy delays each direction, adds deterministic jitter and
+-// drops selected input/snapshot updates. TCP itself remains a reliable ordered
+-// stream; protocol sequence tests separately cover stale/reordered inputs.
+-func latencyProxy(t *testing.T, target string, latency time.Duration) (string, func()) {
+-	t.Helper()
+-	l, e := net.Listen("tcp", "127.0.0.1:0")
+-	if e != nil {
+-		t.Fatal(e)
+-	}
+-	ctx, cancel := context.WithCancel(context.Background())
+-	var connections []net.Conn
+-	done := make(chan struct{})
+-	go func() {
+-		defer close(done)
+-		for {
+-			a, e := l.Accept()
+-			if e != nil {
+-				return
+-			}
+-			b, e := net.Dial("tcp", target)
+-			if e != nil {
+-				a.Close()
+-				continue
+-			}
+-			connections = append(connections, a, b)
+-			for direction := 0; direction < 2; direction++ {
+-				src, dst := a, b
+-				if direction == 1 {
+-					src, dst = b, a
+-				}
+-				go func(src, dst net.Conn, seed int64) {
+-					rng := rand.New(rand.NewSource(seed))
+-					scan := bufio.NewScanner(src)
+-					scan.Buffer(make([]byte, 4096), 128<<10)
+-					for scan.Scan() {
+-						line := append([]byte(nil), scan.Bytes()...)
+-						var m map[string]any
+-						_ = json.Unmarshal(line, &m)
+-						if (m["type"] == "input" || m["type"] == "state") && rng.Intn(20) == 0 {
+-							continue
+-						}
+-						delay := latency/2 + time.Duration(rng.Int63n(int64(latency/5+1)))
+-						timer := time.NewTimer(delay)
+-						select {
+-						case <-ctx.Done():
+-							timer.Stop()
+-							return
+-						case <-timer.C:
+-						}
+-						if _, e := dst.Write(append(line, '\n')); e != nil {
+-							return
+-						}
+-					}
+-				}(src, dst, int64(direction+7))
+-			}
+-		}
+-	}()
+-	closeFn := func() {
+-		cancel()
+-		l.Close()
+-		<-done
+-		for _, c := range connections {
+-			c.Close()
+-		}
+-	}
+-	return l.Addr().String(), closeFn
+-}
+-func TestLatencyJitterAndDroppedUpdates(t *testing.T) {
+-	for _, ms := range []int{50, 100, 200} {
+-		t.Run(fmt.Sprint(ms), func(t *testing.T) {
+-			s, address := testServer(t)
+-			proxy, stop := latencyProxy(t, address, time.Duration(ms)*time.Millisecond)
+-			defer stop()
+-			a := testClient(t, proxy)
+-			b := testClient(t, address)
+-			a.Send(Message{Type: "create"})
+-			room := waitUpdate(t, a, func(u Update) bool { return u.Type == "welcome" })
+-			b.Send(Message{Type: "join", Room: room.Room})
+-			waitUpdate(t, b, func(u Update) bool { return u.Type == "welcome" })
+-			a.Send(Message{Type: "ready"})
+-			b.Send(Message{Type: "ready"})
+-			waitUpdate(t, b, func(u Update) bool { return u.State == "countdown" })
+-			for n := 0; n < 181; n++ {
+-				s.Tick(time.Now())
+-			}
+-			waitUpdate(t, a, func(u Update) bool { return u.State == "fighting" })
+-			a.SendInput(play.Input{PowerPressed: true})
+-			time.Sleep(time.Duration(ms) * time.Millisecond)
+-			for n := 0; n < 30; n++ {
+-				s.Tick(time.Now())
+-			}
+-			u := waitUpdate(t, a, func(u Update) bool { return u.Snapshot != nil && u.Snapshot.Tick >= 30 })
+-			if u.Snapshot.Fighters[0].BuffStacks != 1 {
+-				t.Fatalf("skill missing under latency: tick=%d ack=%v mp=%v", u.Snapshot.Tick, u.Snapshot.Ack, u.Snapshot.Fighters[0].MP)
+-			}
+-			if u.Snapshot.Fighters[0].MP < 69 || u.Snapshot.Fighters[0].MP > 72 {
+-				t.Fatal("authority corrupted under latency")
+-			}
+-		})
+-	}
+-}
+-func TestVersionTimeoutIsolationAndResourceCleanup(t *testing.T) {
+-	s, address := testServer(t)
+-	a := testClient(t, address)
+-	a.Send(Message{Version: 999, Type: "nonsense"})
+-	waitUpdate(t, a, func(u Update) bool { return u.Type == "error" })
+-	a.Send(Message{Type: "create"})
+-	u := waitUpdate(t, a, func(u Update) bool { return u.Type == "welcome" })
+-	b := testClient(t, address)
+-	b.Send(Message{Type: "resume", Room: u.Room, Token: strings.Repeat("0", 48)})
+-	waitUpdate(t, b, func(u Update) bool { return u.Error == "invalid_resume" })
+-	a.Close()
+-	deadline := time.Now().Add(time.Second)
+-	for time.Now().Before(deadline) {
+-		s.mu.Lock()
+-		gone := s.rooms[u.Room].slots[0].peer == nil
+-		s.mu.Unlock()
+-		if gone {
+-			break
+-		}
+-		time.Sleep(time.Millisecond)
+-	}
+-	s.Tick(time.Now().Add(31 * time.Second))
+-	if s.RoomCount() != 0 {
+-		t.Fatal("expired room not removed")
+-	}
+-}
+-
+-func TestIndependentRoomsIgnoreSpoofedRoomOnInput(t *testing.T) {
+-	s, address := testServer(t)
+-	a, _, first, _ := createPair(t, s, address)
+-	_, _, second, _ := createPair(t, s, address)
+-	if first == second {
+-		t.Fatal("room collision")
+-	}
+-	a.Send(Message{Type: "input", Room: second, Seq: 1, Input: play.Input{PowerPressed: true}})
+-	deadline := time.Now().Add(time.Second)
+-	for time.Now().Before(deadline) {
+-		s.mu.Lock()
+-		received := s.rooms[first].slots[0].seq == 1
+-		s.mu.Unlock()
+-		if received {
+-			break
+-		}
+-		time.Sleep(time.Millisecond)
+-	}
+-	for n := 0; n < 30; n++ {
+-		s.Tick(time.Now())
+-	}
+-	s.mu.Lock()
+-	defer s.mu.Unlock()
+-	if s.rooms[first].combat.Fighters[0].BuffStacks != 1 || s.rooms[second].combat.Fighters[0].BuffStacks != 0 {
+-		t.Fatal("input crossed room boundary")
+-	}
+-}
+diff -ruN --exclude=.git upstream/fightnet/probe.go arm64/fightnet/probe.go
+--- upstream/fightnet/probe.go	2026-11-10 00:37:17
++++ arm64/fightnet/probe.go	1970-01-01 08:00:00
+@@ -1,70 +0,0 @@
+-package fightnet
+-
+-import (
+-	"bufio"
+-	"context"
+-	"encoding/json"
+-	"fmt"
+-	"net"
+-	"strconv"
+-	"strings"
+-	"time"
+-)
+-
+-func NormalizeAddress(address string) (string, error) {
+-	address = strings.TrimSpace(address)
+-	target := address
+-	for _, prefix := range []string{"tcp://", "tls://"} {
+-		target = strings.TrimPrefix(target, prefix)
+-	}
+-	host, port, err := net.SplitHostPort(target)
+-	number, parseErr := strconv.Atoi(port)
+-	if err != nil || parseErr != nil || host == "" || number < 1 || number > 65535 || len(address) > 255 || strings.ContainsAny(host, "/\\ \t\r\n") {
+-		return "", fmt.Errorf("invalid server address: use host:port or tls://host:port")
+-	}
+-	return address, nil
+-}
+-
+-type ProbeResult struct {
+-	Version   int
+-	RoundTrip time.Duration
+-}
+-
+-// Probe checks the actual fight protocol, not just whether a TCP port is open.
+-// It never creates a room and always releases its temporary connection.
+-func Probe(ctx context.Context, address string) (ProbeResult, error) {
+-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+-	defer cancel()
+-	started := time.Now()
+-	conn, err := dialConnection(ctx, address)
+-	if err != nil {
+-		return ProbeResult{}, err
+-	}
+-	defer conn.Close()
+-	stop := context.AfterFunc(ctx, func() { conn.Close() })
+-	defer stop()
+-	deadline, _ := ctx.Deadline()
+-	conn.SetDeadline(deadline)
+-	if err := json.NewEncoder(conn).Encode(Message{Version: ProtocolVersion, Type: "ping"}); err != nil {
+-		return ProbeResult{}, err
+-	}
+-	scanner := bufio.NewScanner(conn)
+-	scanner.Buffer(make([]byte, 1024), MaxMessageBytes)
+-	if !scanner.Scan() {
+-		if err := scanner.Err(); err != nil {
+-			return ProbeResult{}, err
+-		}
+-		return ProbeResult{}, fmt.Errorf("server closed the connection without a fight-protocol response")
+-	}
+-	var update Update
+-	if err := json.Unmarshal(scanner.Bytes(), &update); err != nil {
+-		return ProbeResult{}, fmt.Errorf("not a NaiWa fight server: %w", err)
+-	}
+-	if update.Version != ProtocolVersion {
+-		return ProbeResult{}, fmt.Errorf("protocol version mismatch: server %d, client %d", update.Version, ProtocolVersion)
+-	}
+-	if update.Type != "pong" {
+-		return ProbeResult{}, fmt.Errorf("server rejected connection test: %s", update.Error)
+-	}
+-	return ProbeResult{Version: update.Version, RoundTrip: time.Since(started)}, nil
+-}
+diff -ruN --exclude=.git upstream/fightnet/protocol.go arm64/fightnet/protocol.go
+--- upstream/fightnet/protocol.go	2026-11-10 00:37:17
++++ arm64/fightnet/protocol.go	1970-01-01 08:00:00
+@@ -1,33 +0,0 @@
+-// Package fightnet implements room-isolated, server-authoritative combat.
+-// Only input, room identity and combat state cross the connection.
+-package fightnet
+-
+-import (
+-	"codexpet/reconstruction/play"
+-)
+-
+-const ProtocolVersion = 2
+-const MaxMessageBytes = 4096
+-
+-type Message struct {
+-	Version int        `json:"version"`
+-	Type    string     `json:"type"`
+-	Room    string     `json:"room,omitempty"`
+-	Token   string     `json:"token,omitempty"`
+-	Seq     uint64     `json:"seq,omitempty"`
+-	Input   play.Input `json:"input,omitempty"`
+-}
+-type Update struct {
+-	Version   int                  `json:"version"`
+-	Type      string               `json:"type"`
+-	Room      string               `json:"room,omitempty"`
+-	Token     string               `json:"token,omitempty"`
+-	Player    int                  `json:"player"`
+-	Error     string               `json:"error,omitempty"`
+-	State     string               `json:"state,omitempty"`
+-	Match     uint64               `json:"match,omitempty"`
+-	Ready     [2]bool              `json:"ready"`
+-	Connected [2]bool              `json:"connected"`
+-	Countdown int                  `json:"countdown,omitempty"`
+-	Snapshot  *play.CombatSnapshot `json:"snapshot,omitempty"`
+-}
+diff -ruN --exclude=.git upstream/fightnet/result_test.go arm64/fightnet/result_test.go
+--- upstream/fightnet/result_test.go	2026-11-10 00:37:17
++++ arm64/fightnet/result_test.go	1970-01-01 08:00:00
+@@ -1,48 +0,0 @@
+-package fightnet
+-
+-import (
+-	"codexpet/reconstruction/play"
+-	"testing"
+-	"time"
+-)
+-
+-func TestFinalResultsAndRetunedMatchReachBothClients(t *testing.T) {
+-	s, address := testServer(t)
+-	a, b, code, _ := createPair(t, s, address)
+-	u := b.State()
+-	if u.Snapshot == nil || u.Snapshot.Clock <= 119 || u.Snapshot.Clock > 120 || u.Snapshot.Fighters[0].MaxHP != 80 || u.Snapshot.Fighters[1].MaxHP != 80 {
+-		t.Fatal("old match numbers on wire")
+-	}
+-	match := u.Match
+-	for winner := -1; winner <= 1; winner++ {
+-		if winner >= 0 {
+-			a.Send(Message{Type: "rematch"})
+-			b.Send(Message{Type: "rematch"})
+-			u = waitUpdate(t, b, func(u Update) bool { return u.State == "countdown" })
+-			match = u.Match
+-		}
+-		s.mu.Lock()
+-		r := s.rooms[code]
+-		r.state = "fighting"
+-		r.combat.Arena.Phase = play.Fighting
+-		r.combat.Arena.Clock = play.CombatDT
+-		if winner >= 0 {
+-			r.combat.Fighters[1-winner].HP = 40
+-			r.combat.Arena.PetHP = r.combat.Fighters[0].HP
+-			r.combat.Arena.FoeHP = r.combat.Fighters[1].HP
+-		}
+-		s.mu.Unlock()
+-		for n := 0; n < 165; n++ {
+-			s.Tick(time.Now())
+-		}
+-		for _, client := range []*Client{a, b} {
+-			u = waitUpdate(t, client, func(u Update) bool { return u.State == "over" && u.Match == match })
+-			if u.Snapshot == nil || u.Snapshot.Winner != winner || u.Snapshot.Phase != play.Over {
+-				t.Fatal("authoritative final result lost", winner)
+-			}
+-			if len(u.Snapshot.Events) != 0 {
+-				t.Fatal("test must receive a durable result after transient events expired")
+-			}
+-		}
+-	}
+-}
+diff -ruN --exclude=.git upstream/fightnet/server.go arm64/fightnet/server.go
+--- upstream/fightnet/server.go	2026-11-10 00:37:17
++++ arm64/fightnet/server.go	1970-01-01 08:00:00
+@@ -1,497 +0,0 @@
+-package fightnet
+-
+-import (
+-	"bufio"
+-	"context"
+-	"crypto/rand"
+-	"encoding/hex"
+-	"encoding/json"
+-	"fmt"
+-	"net"
+-	"strings"
+-	"sync"
+-	"time"
+-
+-	"codexpet/reconstruction/play"
+-)
+-
+-type ServerConfig struct {
+-	Rules                    *play.CombatRules
+-	MaxRooms, MaxConnections int
+-	ReconnectGrace           time.Duration
+-	ManualTicks              bool
+-}
+-type Server struct {
+-	mu       sync.Mutex
+-	config   ServerConfig
+-	rooms    map[string]*room
+-	peers    map[*peer]bool
+-	listener net.Listener
+-	closed   bool
+-	wg       sync.WaitGroup
+-}
+-type room struct {
+-	resumeState string
+-	code        string
+-	slots       [2]*slot
+-	combat      *play.Combat
+-	countdown   int
+-	state       string
+-	touched     time.Time
+-	ticks       uint64
+-	match       uint64
+-}
+-type slot struct {
+-	token        string
+-	peer         *peer
+-	ready        bool
+-	input        play.Input
+-	seq          uint64
+-	disconnected time.Time
+-	inputAt      time.Time
+-}
+-type peer struct {
+-	conn   net.Conn
+-	out    chan Update
+-	room   *room
+-	player int
+-	done   chan struct{}
+-	once   sync.Once
+-	tokens float64
+-	refill time.Time
+-}
+-
+-func NewServer(config ServerConfig) *Server {
+-	if config.MaxRooms <= 0 {
+-		config.MaxRooms = 128
+-	}
+-	if config.MaxConnections <= 0 {
+-		config.MaxConnections = 256
+-	}
+-	if config.ReconnectGrace <= 0 {
+-		config.ReconnectGrace = 30 * time.Second
+-	}
+-	return &Server{config: config, rooms: map[string]*room{}, peers: map[*peer]bool{}}
+-}
+-func randomID(bytes int) string {
+-	b := make([]byte, bytes)
+-	if _, e := rand.Read(b); e != nil {
+-		panic(e)
+-	}
+-	return strings.ToUpper(hex.EncodeToString(b))
+-}
+-func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
+-	s.mu.Lock()
+-	if s.closed {
+-		s.mu.Unlock()
+-		return net.ErrClosed
+-	}
+-	s.listener = listener
+-	s.mu.Unlock()
+-	go func() { <-ctx.Done(); s.Close() }()
+-	if !s.config.ManualTicks {
+-		s.wg.Add(1)
+-		go func() {
+-			defer s.wg.Done()
+-			ticker := time.NewTicker(time.Second / play.CombatHz)
+-			defer ticker.Stop()
+-			last := time.Now()
+-			accumulator := 0.0
+-			for {
+-				select {
+-				case <-ctx.Done():
+-					return
+-				case <-ticker.C:
+-					now := time.Now()
+-					accumulator += min(.25, now.Sub(last).Seconds())
+-					last = now
+-					for accumulator+1e-12 >= play.CombatDT {
+-						s.Tick(now)
+-						accumulator -= play.CombatDT
+-					}
+-					s.mu.Lock()
+-					closed := s.closed
+-					s.mu.Unlock()
+-					if closed {
+-						return
+-					}
+-				}
+-			}
+-		}()
+-	}
+-	for {
+-		conn, err := listener.Accept()
+-		if err != nil {
+-			return err
+-		}
+-		s.mu.Lock()
+-		if s.closed || len(s.peers) >= s.config.MaxConnections {
+-			s.mu.Unlock()
+-			conn.Close()
+-			continue
+-		}
+-		host, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
+-		sameIP := 0
+-		for p := range s.peers {
+-			h, _, _ := net.SplitHostPort(p.conn.RemoteAddr().String())
+-			if h == host {
+-				sameIP++
+-			}
+-		}
+-		if sameIP >= 8 {
+-			s.mu.Unlock()
+-			conn.Close()
+-			continue
+-		}
+-		p := &peer{conn: conn, out: make(chan Update, 4), done: make(chan struct{}), player: -1, tokens: 60, refill: time.Now()}
+-		s.peers[p] = true
+-		s.wg.Add(1)
+-		s.mu.Unlock()
+-		go s.runPeer(p)
+-	}
+-}
+-func (s *Server) runPeer(p *peer) {
+-	defer s.wg.Done()
+-	defer s.disconnect(p)
+-	writerDone := make(chan struct{})
+-	go func() {
+-		defer close(writerDone)
+-		encoder := json.NewEncoder(p.conn)
+-		for {
+-			select {
+-			case <-p.done:
+-				return
+-			case u := <-p.out:
+-				p.conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
+-				if encoder.Encode(u) != nil {
+-					p.conn.Close()
+-					return
+-				}
+-			}
+-		}
+-	}()
+-	defer func() { p.stop(); <-writerDone }()
+-	scanner := bufio.NewScanner(p.conn)
+-	scanner.Buffer(make([]byte, 1024), MaxMessageBytes)
+-	for {
+-		p.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+-		if !scanner.Scan() {
+-			return
+-		}
+-		now := time.Now()
+-		p.tokens = min(60, p.tokens+now.Sub(p.refill).Seconds()*120)
+-		p.refill = now
+-		if p.tokens < 1 {
+-			s.mu.Lock()
+-			s.send(p, Update{Type: "error", Error: "rate_limit"})
+-			s.mu.Unlock()
+-			return
+-		}
+-		p.tokens--
+-		var msg Message
+-		decoder := json.NewDecoder(strings.NewReader(scanner.Text()))
+-		decoder.DisallowUnknownFields()
+-		if err := decoder.Decode(&msg); err != nil {
+-			s.mu.Lock()
+-			s.send(p, Update{Type: "error", Error: "invalid_message"})
+-			s.mu.Unlock()
+-			continue
+-		}
+-		if msg.Version != ProtocolVersion {
+-			s.mu.Lock()
+-			s.send(p, Update{Type: "error", Error: "version_mismatch"})
+-			s.mu.Unlock()
+-			continue
+-		}
+-		s.handle(p, msg, now)
+-	}
+-}
+-func (p *peer) stop() { p.once.Do(func() { close(p.done); p.conn.Close() }) }
+-func (s *Server) send(p *peer, u Update) {
+-	u.Version = ProtocolVersion
+-	u.Player = p.player
+-	select {
+-	case <-p.done:
+-		return
+-	default:
+-	}
+-	select {
+-	case p.out <- u:
+-	default: // Drop an obsolete snapshot, never block the simulation.
+-		select {
+-		case <-p.out:
+-		default:
+-		}
+-		select {
+-		case p.out <- u:
+-		default:
+-		}
+-	}
+-}
+-func (s *Server) handle(p *peer, m Message, now time.Time) {
+-	s.mu.Lock()
+-	defer s.mu.Unlock()
+-	fail := func(e string) { s.send(p, Update{Type: "error", Error: e}) }
+-	switch m.Type {
+-	case "ping":
+-		s.send(p, Update{Type: "pong"})
+-		return
+-	case "create":
+-		if p.room != nil {
+-			fail("already_in_room")
+-			return
+-		}
+-		if len(s.rooms) >= s.config.MaxRooms {
+-			fail("room_limit")
+-			return
+-		}
+-		r := &room{code: randomID(3), state: "waiting", touched: now}
+-		for s.rooms[r.code] != nil {
+-			r.code = randomID(3)
+-		}
+-		s.rooms[r.code] = r
+-		s.attach(p, r, 0, now)
+-	case "join":
+-		if p.room != nil {
+-			fail("already_in_room")
+-			return
+-		}
+-		code := strings.ToUpper(strings.TrimSpace(m.Room))
+-		r := s.rooms[code]
+-		if r == nil || len(code) != 6 {
+-			fail("room_not_found")
+-			return
+-		}
+-		if r.slots[1] != nil {
+-			fail("room_full")
+-			return
+-		}
+-		s.attach(p, r, 1, now)
+-	case "resume":
+-		if p.room != nil || len(m.Token) != 48 || len(m.Room) != 6 {
+-			fail("invalid_resume")
+-			return
+-		}
+-		r := s.rooms[m.Room]
+-		if r == nil {
+-			fail("room_not_found")
+-			return
+-		}
+-		found := -1
+-		for i, v := range r.slots {
+-			if v != nil && v.token == m.Token && v.peer == nil && now.Sub(v.disconnected) < s.config.ReconnectGrace {
+-				found = i
+-			}
+-		}
+-		if found < 0 {
+-			fail("invalid_resume")
+-			return
+-		}
+-		p.room, p.player = r, found
+-		r.slots[found].peer = p
+-		r.slots[found].disconnected = time.Time{}
+-		r.slots[found].input = play.Input{}
+-		s.send(p, Update{Type: "welcome", Room: r.code, Token: r.slots[found].token})
+-		if s.bothConnected(r) && r.state == "disconnected" {
+-			r.state = r.resumeState
+-			if r.state == "" {
+-				r.state = "fighting"
+-			}
+-		}
+-		s.broadcast(r)
+-	case "leave":
+-		s.leave(p, false, now)
+-	case "ready", "rematch":
+-		r := p.room
+-		if r == nil {
+-			fail("not_in_room")
+-			return
+-		}
+-		if m.Type == "ready" && r.state != "waiting" || m.Type == "rematch" && r.state != "over" {
+-			fail("invalid_room_state")
+-			return
+-		}
+-		r.slots[p.player].ready = true
+-		if s.bothReady(r) {
+-			var err error
+-			r.combat, err = play.NewConfiguredCombat(false, s.config.Rules)
+-			if err != nil {
+-				fail("invalid_server_rules")
+-				return
+-			}
+-			r.countdown = 180
+-			r.match++
+-			r.state = "countdown"
+-			for _, v := range r.slots {
+-				v.input = play.Input{}
+-				v.ready = false
+-			}
+-		}
+-		s.broadcast(r)
+-	case "input":
+-		r := p.room
+-		if r == nil || r.state != "fighting" {
+-			return
+-		}
+-		v := r.slots[p.player]
+-		if m.Seq <= v.seq || m.Seq-v.seq > 4096 {
+-			return
+-		}
+-		v.seq = m.Seq
+-		in := m.Input
+-		in.MergeEdges(v.input)
+-		v.input = in
+-		v.inputAt = now
+-	default:
+-		fail("unknown_message")
+-	}
+-}
+-func (s *Server) attach(p *peer, r *room, i int, now time.Time) {
+-	p.room, p.player = r, i
+-	r.slots[i] = &slot{token: randomID(24), peer: p, inputAt: now}
+-	s.send(p, Update{Type: "welcome", Room: r.code, Token: r.slots[i].token})
+-	s.broadcast(r)
+-}
+-func (s *Server) bothConnected(r *room) bool {
+-	return r.slots[0] != nil && r.slots[1] != nil && r.slots[0].peer != nil && r.slots[1].peer != nil
+-}
+-func (s *Server) bothReady(r *room) bool {
+-	return s.bothConnected(r) && r.slots[0].ready && r.slots[1].ready
+-}
+-func (s *Server) broadcast(r *room) {
+-	u := Update{Type: "state", Room: r.code, Match: r.match, State: r.state, Countdown: r.countdown}
+-	for i, v := range r.slots {
+-		if v != nil {
+-			u.Ready[i] = v.ready
+-			u.Connected[i] = v.peer != nil
+-		}
+-	}
+-	if r.combat != nil {
+-		snap := r.combat.Snapshot()
+-		for i, v := range r.slots {
+-			if v != nil {
+-				snap.Ack[i] = v.seq
+-			}
+-		}
+-		u.Snapshot = &snap
+-	}
+-	for _, v := range r.slots {
+-		if v != nil && v.peer != nil {
+-			personal := u
+-			personal.Token = v.token
+-			s.send(v.peer, personal)
+-		}
+-	}
+-}
+-func (s *Server) leave(p *peer, disconnected bool, now time.Time) {
+-	r := p.room
+-	if r == nil {
+-		return
+-	}
+-	v := r.slots[p.player]
+-	if disconnected {
+-		v.peer = nil
+-		v.input = play.Input{}
+-		v.disconnected = now
+-		if r.state == "fighting" || r.state == "countdown" {
+-			r.resumeState = r.state
+-			r.state = "disconnected"
+-		}
+-	} else {
+-		for _, v := range r.slots {
+-			if v != nil && v.peer != nil {
+-				s.send(v.peer, Update{Type: "left", Room: r.code, State: "closed"})
+-				v.peer.room = nil
+-				v.peer.player = -1
+-			}
+-		}
+-		delete(s.rooms, r.code)
+-	}
+-	p.room = nil
+-	if !disconnected {
+-		return
+-	}
+-	s.broadcast(r)
+-}
+-func (s *Server) disconnect(p *peer) {
+-	s.mu.Lock()
+-	defer s.mu.Unlock()
+-	s.leave(p, true, time.Now())
+-	delete(s.peers, p)
+-	p.stop()
+-}
+-
+-// Tick advances every active room by one fixed tick. Exposed for deterministic
+-// network integration tests; production Serve calls it at 60 Hz.
+-func (s *Server) Tick(now time.Time) {
+-	s.mu.Lock()
+-	defer s.mu.Unlock()
+-	for code, r := range s.rooms {
+-		r.ticks++
+-		previousState := r.state
+-		expired := false
+-		for _, v := range r.slots {
+-			if v != nil && v.peer == nil && !v.disconnected.IsZero() && now.Sub(v.disconnected) > s.config.ReconnectGrace {
+-				expired = true
+-			}
+-		}
+-		if r.state == "waiting" && now.Sub(r.touched) > 10*time.Minute {
+-			expired = true
+-		}
+-		if expired {
+-			for _, v := range r.slots {
+-				if v != nil && v.peer != nil {
+-					s.send(v.peer, Update{Type: "left", State: "closed", Error: "reconnect_timeout"})
+-					v.peer.room = nil
+-					v.peer.player = -1
+-				}
+-			}
+-			delete(s.rooms, code)
+-			continue
+-		}
+-		if r.state == "countdown" {
+-			r.countdown--
+-			if r.countdown <= 0 {
+-				r.state = "fighting"
+-				r.combat.Arena.Phase = play.Fighting
+-			}
+-		}
+-		if r.state == "fighting" && s.bothConnected(r) {
+-			var in [2]play.Input
+-			for i, v := range r.slots {
+-				if now.Sub(v.inputAt) <= 250*time.Millisecond {
+-					in[i] = v.input
+-				}
+-				v.input.ClearEdges()
+-			}
+-			r.combat.Step(in)
+-			if r.combat.Arena.Phase == play.Over {
+-				r.state = "over"
+-			}
+-		}
+-		if r.ticks%3 == 0 || previousState != r.state {
+-			s.broadcast(r)
+-		}
+-	}
+-}
+-func (s *Server) Close() error {
+-	s.mu.Lock()
+-	if s.closed {
+-		s.mu.Unlock()
+-		return nil
+-	}
+-	s.closed = true
+-	listener := s.listener
+-	for p := range s.peers {
+-		s.send(p, Update{Type: "left", State: "closed", Error: "server_shutdown"})
+-		p.stop()
+-	}
+-	s.mu.Unlock()
+-	if listener != nil {
+-		return listener.Close()
+-	}
+-	return nil
+-}
+-func (s *Server) Wait()          { s.wg.Wait() }
+-func (s *Server) RoomCount() int { s.mu.Lock(); defer s.mu.Unlock(); return len(s.rooms) }
+-func (s *Server) String() string { return fmt.Sprintf("NaiWa fight protocol %d", ProtocolVersion) }
+diff -ruN --exclude=.git upstream/fightnet/session_stability_test.go arm64/fightnet/session_stability_test.go
+--- upstream/fightnet/session_stability_test.go	2026-11-10 00:37:17
++++ arm64/fightnet/session_stability_test.go	1970-01-01 08:00:00
+@@ -1,86 +0,0 @@
+-package fightnet
+-
+-import (
+-	"bufio"
+-	"context"
+-	"encoding/json"
+-	"net"
+-	"testing"
+-	"time"
+-
+-	"codexpet/reconstruction/play"
+-)
+-
+-func TestRematchSnapshotRecoversWhenCountdownWasMissed(t *testing.T) {
+-	l, err := net.Listen("tcp4", "127.0.0.1:0")
+-	if err != nil {
+-		t.Fatal(err)
+-	}
+-	defer l.Close()
+-	done := make(chan struct{})
+-	stop := make(chan struct{})
+-	go func() {
+-		defer close(done)
+-		conn, err := l.Accept()
+-		if err != nil {
+-			return
+-		}
+-		defer conn.Close()
+-		encoder := json.NewEncoder(conn)
+-		for _, u := range []Update{
+-			{Version: ProtocolVersion, Type: "state", Match: 1, State: "fighting", Snapshot: &play.CombatSnapshot{Tick: 9000}},
+-			{Version: ProtocolVersion, Type: "state", Match: 2, State: "fighting", Snapshot: &play.CombatSnapshot{Tick: 30}},
+-			{Version: ProtocolVersion, Type: "state", Match: 1, State: "fighting", Snapshot: &play.CombatSnapshot{Tick: 9003}},
+-		} {
+-			if encoder.Encode(u) != nil {
+-				return
+-			}
+-		}
+-		<-stop
+-	}()
+-	defer func() { close(stop); l.Close(); <-done }()
+-	c, err := Dial(context.Background(), l.Addr().String())
+-	if err != nil {
+-		t.Fatal(err)
+-	}
+-	defer c.Close()
+-	waitUpdate(t, c, func(u Update) bool { return u.Match == 2 })
+-	time.Sleep(10 * time.Millisecond)
+-	state := c.State()
+-	if state.Match != 2 || state.Snapshot.Tick != 30 {
+-		t.Fatalf("new match stuck behind old tick: %+v", state)
+-	}
+-}
+-
+-func TestInputWriterCoalescesStalledFrames(t *testing.T) {
+-	a, b := net.Pipe()
+-	defer b.Close()
+-	c := &Client{conn: a, inputQueue: make(chan Message, 8), done: make(chan struct{})}
+-	defer c.Close()
+-	for seq := uint64(1); seq <= 8; seq++ {
+-		c.inputQueue <- Message{Type: "input", Seq: seq, Input: play.Input{Left: seq < 8, Right: seq == 8, FanPressed: seq == 1, AttackPressed: seq == 4}}
+-	}
+-	go c.writeInputs()
+-	b.SetReadDeadline(time.Now().Add(time.Second))
+-	var msg Message
+-	if err := json.NewDecoder(bufio.NewReader(b)).Decode(&msg); err != nil {
+-		t.Fatal(err)
+-	}
+-	if msg.Seq != 8 || msg.Input.Left || !msg.Input.Right || !msg.Input.FanPressed || !msg.Input.AttackPressed {
+-		t.Fatalf("old movements replayed or press edges lost: %+v", msg)
+-	}
+-}
+-
+-func TestRoomSnapshotRateStaysBoundedAfterMatch(t *testing.T) {
+-	s := NewServer(ServerConfig{ManualTicks: true})
+-	p := &peer{player: 0, out: make(chan Update, 100), done: make(chan struct{})}
+-	c := play.NewCombat(false)
+-	r := &room{code: "ABC123", state: "over", combat: c, slots: [2]*slot{{peer: p}, nil}}
+-	s.rooms[r.code] = r
+-	for tick := 0; tick < 60; tick++ {
+-		s.Tick(time.Now())
+-	}
+-	if got := len(p.out); got != 20 {
+-		t.Fatalf("finished match broadcasts %d times/sec; want 20", got)
+-	}
+-}
