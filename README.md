@@ -15,16 +15,18 @@
 | 项 | 状态 |
 |---|---|
 | 桌宠本体（动画、表情、拖动、右键菜单） | 跑在 Mac 上，已截图确认渲染 |
+| 卡死自恢复 | 心跳文件 + 启动器看门狗，实测卡死后 41 秒自动重开 |
 | 键盘操控、走动跳跃、打苍蝇、专注计时 | 正常 |
-| 单机挑战 | 保留 |
-| 联机（房间、局域网、大厅、重连） | 已删除 |
+| 单机挑战 | 保留；冒烟报告 3 轮生命周期、479 帧、12 FPS、GDI 句柄无泄漏 |
+| 联机（房间、局域网、大厅、重连） | 已删除，界面里只剩「设置 / 高级」两页 |
 | 聊天 → 本机 Hermes | 命令行自检通过（`-chat-ping`），桥的日志有记录 |
 
 ## 快速开始
 
 ```sh
-# 1) 装 arm64 Wine（MetalSharp 6.0，约 918 MB 压缩包）
-#    先下 release，解压到 ~/Projects/NaiWaChatPet/wine-arm64/
+# 1) 装 arm64 Wine（MetalSharp 6.0）
+#    用签名版 MetalSharp-Wine-6.0-arm64.zip（1.36 GB），解压出 MetalSharp-Wine.app 放进
+#    ~/Projects/NaiWaChatPet/wine-arm64/ ；解压版 tar.xz 也能跑，但同样会偶发卡死
 #    下载地址：https://github.com/metalsharp/MetalSharp-Wine/releases
 #    单连接会被限速（~200 KB/s），分包并发下快得多，见 scripts/fetch-wine.sh
 
@@ -65,6 +67,16 @@ python3 scripts/naiwa-hermes-bridge.py &
 - 大厅去掉「联机」页，只留设置和高级；右键菜单去掉「联机大厅」
 - `companion/server.go`：加 `NAIWA_BASE_URL` / `NAIWA_MODEL` / `NAIWA_API_KEY` 环境变量，启动时直接指向本机桥
 - `main.go`：加 `-chat-ping "文本"`，一条命令验证聊天链路
+
+## 卡死自恢复
+
+MetalSharp 的 arm64 Wine 会偶发进程级死锁：窗口还在、点不动、CPU 掉到 1%，`sample` 里线程全堵在
+Wine 的 `msync` 锁上。同一个 exe 编成 x86_64 跑 Wine Staging（Rosetta）就没这问题 —— 是 arm64 Wine
+自己的同步缺陷，解压版和签名版都中。
+
+所以程序每 2 秒写 `Source/NaiWaChatPet/.heartbeat`，启动器每 5 秒看一眼，超 40 秒就 `kill -9`、`wineserver -k`、
+重开（最多 5 次），记录写 `/tmp/naiwa-launcher.log`。程序里另有一个 90 秒的内部看门狗 `os.Exit(3)` 兜底。
+实测从卡死到恢复约 41 秒。
 
 ## Hermes 桥
 
