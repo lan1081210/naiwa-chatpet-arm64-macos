@@ -1,5 +1,5 @@
 diff -ruN --exclude=.git upstream/cmd/codexpet/combat_online_probe_windows.go arm64/cmd/codexpet/combat_online_probe_windows.go
---- upstream/cmd/codexpet/combat_online_probe_windows.go	2026-11-10 00:37:17
+--- upstream/cmd/codexpet/combat_online_probe_windows.go	2026-11-11 02:13:55
 +++ arm64/cmd/codexpet/combat_online_probe_windows.go	1970-01-01 08:00:00
 @@ -1,153 +0,0 @@
 -//go:build windows
@@ -156,8 +156,8 @@ diff -ruN --exclude=.git upstream/cmd/codexpet/combat_online_probe_windows.go ar
 -	p.samples = append(p.samples, map[string]any{"seconds": time.Since(combatProbeData.Started).Seconds(), "tick": u.snapshot.Tick, "state": u.networkState, "gdi": gdi, "user": user, "sprites": ownedSpriteCount(a), "effects": len(a.play.effects), "skillCacheEntries": len(u.frameCache), "error": errText, "fighters": u.snapshot.Fighters})
 -}
 diff -ruN --exclude=.git upstream/cmd/codexpet/combat_probe_windows.go arm64/cmd/codexpet/combat_probe_windows.go
---- upstream/cmd/codexpet/combat_probe_windows.go	2026-11-10 00:37:17
-+++ arm64/cmd/codexpet/combat_probe_windows.go	2026-11-10 00:37:17
+--- upstream/cmd/codexpet/combat_probe_windows.go	2026-11-11 02:13:55
++++ arm64/cmd/codexpet/combat_probe_windows.go	2026-11-11 02:13:55
 @@ -17,7 +17,6 @@
  )
  
@@ -237,7 +237,7 @@ diff -ruN --exclude=.git upstream/cmd/codexpet/combat_probe_windows.go arm64/cmd
  	b, _ := json.MarshalIndent(report, "", "  ")
  	_ = os.MkdirAll(filepath.Dir(combatSmokeReport), 0700)
 diff -ruN --exclude=.git upstream/cmd/codexpet/combat_result_windows_test.go arm64/cmd/codexpet/combat_result_windows_test.go
---- upstream/cmd/codexpet/combat_result_windows_test.go	2026-11-10 00:37:17
+--- upstream/cmd/codexpet/combat_result_windows_test.go	2026-11-11 02:13:55
 +++ arm64/cmd/codexpet/combat_result_windows_test.go	1970-01-01 08:00:00
 @@ -1,121 +0,0 @@
 -//go:build windows
@@ -361,9 +361,33 @@ diff -ruN --exclude=.git upstream/cmd/codexpet/combat_result_windows_test.go arm
 -		}
 -	}
 -}
+diff -ruN --exclude=.git upstream/cmd/codexpet/config.go arm64/cmd/codexpet/config.go
+--- upstream/cmd/codexpet/config.go	2026-11-11 02:13:55
++++ arm64/cmd/codexpet/config.go	2026-11-11 02:13:55
+@@ -182,6 +182,7 @@
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	traceStartup("loadAssets: runtime.json ok, states validated")
+ 	engine, err := animation.New(ac)
+ 	if err != nil {
+ 		return nil, err
+@@ -266,10 +267,12 @@
+ 			memory[leaf] = b
+ 		}
+ 	}
++	traceStartup("loadAssets: all frames read, compositing")
+ 	cache, err := compositor.Load(memory, counts, canvas)
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	traceStartup("loadAssets: composite done, hover mask")
+ 	mb, err := readVerified(cfg.HoverMask)
+ 	if err != nil {
+ 		return nil, err
 diff -ruN --exclude=.git upstream/cmd/codexpet/fight_combat_windows.go arm64/cmd/codexpet/fight_combat_windows.go
---- upstream/cmd/codexpet/fight_combat_windows.go	2026-11-10 00:37:17
-+++ arm64/cmd/codexpet/fight_combat_windows.go	2026-11-10 00:37:17
+--- upstream/cmd/codexpet/fight_combat_windows.go	2026-11-11 02:13:55
++++ arm64/cmd/codexpet/fight_combat_windows.go	2026-11-11 02:13:55
 @@ -4,49 +4,25 @@
  
  import (
@@ -853,7 +877,7 @@ diff -ruN --exclude=.git upstream/cmd/codexpet/fight_combat_windows.go arm64/cmd
  		return false
  	}
 diff -ruN --exclude=.git upstream/cmd/codexpet/fight_lan_list_windows.go arm64/cmd/codexpet/fight_lan_list_windows.go
---- upstream/cmd/codexpet/fight_lan_list_windows.go	2026-11-10 00:37:17
+--- upstream/cmd/codexpet/fight_lan_list_windows.go	2026-11-11 02:13:55
 +++ arm64/cmd/codexpet/fight_lan_list_windows.go	1970-01-01 08:00:00
 @@ -1,56 +0,0 @@
 -//go:build windows
@@ -913,7 +937,7 @@ diff -ruN --exclude=.git upstream/cmd/codexpet/fight_lan_list_windows.go arm64/c
 -	}
 -}
 diff -ruN --exclude=.git upstream/cmd/codexpet/fight_lan_permissions_windows.go arm64/cmd/codexpet/fight_lan_permissions_windows.go
---- upstream/cmd/codexpet/fight_lan_permissions_windows.go	2026-11-10 00:37:17
+--- upstream/cmd/codexpet/fight_lan_permissions_windows.go	2026-11-11 02:13:55
 +++ arm64/cmd/codexpet/fight_lan_permissions_windows.go	1970-01-01 08:00:00
 @@ -1,27 +0,0 @@
 -//go:build windows
@@ -945,7 +969,7 @@ diff -ruN --exclude=.git upstream/cmd/codexpet/fight_lan_permissions_windows.go 
 -}
 diff -ruN --exclude=.git upstream/cmd/codexpet/fight_lan_stub_windows.go arm64/cmd/codexpet/fight_lan_stub_windows.go
 --- upstream/cmd/codexpet/fight_lan_stub_windows.go	1970-01-01 08:00:00
-+++ arm64/cmd/codexpet/fight_lan_stub_windows.go	2026-11-10 00:37:17
++++ arm64/cmd/codexpet/fight_lan_stub_windows.go	2026-11-11 02:13:55
 @@ -0,0 +1,50 @@
 +//go:build windows
 +
@@ -998,7 +1022,7 @@ diff -ruN --exclude=.git upstream/cmd/codexpet/fight_lan_stub_windows.go arm64/c
 +
 +func validLobbyCode(code string) bool { return false }
 diff -ruN --exclude=.git upstream/cmd/codexpet/fight_lan_windows.go arm64/cmd/codexpet/fight_lan_windows.go
---- upstream/cmd/codexpet/fight_lan_windows.go	2026-11-10 00:37:17
+--- upstream/cmd/codexpet/fight_lan_windows.go	2026-11-11 02:13:55
 +++ arm64/cmd/codexpet/fight_lan_windows.go	1970-01-01 08:00:00
 @@ -1,160 +0,0 @@
 -//go:build windows
@@ -1162,9 +1186,9 @@ diff -ruN --exclude=.git upstream/cmd/codexpet/fight_lan_windows.go arm64/cmd/co
 -	}
 -}
 diff -ruN --exclude=.git upstream/cmd/codexpet/fight_lobby_layout_windows.go arm64/cmd/codexpet/fight_lobby_layout_windows.go
---- upstream/cmd/codexpet/fight_lobby_layout_windows.go	2026-11-10 00:37:17
-+++ arm64/cmd/codexpet/fight_lobby_layout_windows.go	2026-11-10 00:37:17
-@@ -110,9 +110,8 @@
+--- upstream/cmd/codexpet/fight_lobby_layout_windows.go	2026-11-11 02:13:55
++++ arm64/cmd/codexpet/fight_lobby_layout_windows.go	2026-11-11 02:13:55
+@@ -110,32 +110,11 @@
  		}
  		return window
  	}
@@ -1176,7 +1200,30 @@ diff -ruN --exclude=.git upstream/cmd/codexpet/fight_lobby_layout_windows.go arm
  	button("单机挑战", 14, 674, 34, 96, 36, 0, "secondary")
  	button("桌宠", 16, 786, 34, 82, 36, 0, "quiet")
  	button("继续对战", 15, 724, 518, 144, 32, 0, "secondary")
-@@ -167,9 +166,8 @@
+-	g.roomList = control("LISTBOX", "房间列表", 3, 32, 166, 516, 252, 1, lobbyBody2, 0x00210151)
+-	call(chatSend, g.roomList, 0x01A0, 0, uintptr(g.px(58)))
+-	if g.roomList != 0 {
+-		call(chatSubclass, g.roomList, syscall.NewCallback(lobbyListProc), 8, 0)
+-	}
+-	g.code = control("EDIT", "", 2, 42, 462, 180, 28, 5, lobbyBody2, 0x10080)
+-	call(chatSend, g.code, 0x00C5, 6, 0)
+-	placeholder := utf("6 位房间码")
+-	call(chatSend, g.code, 0x1501, 0, uintptr(unsafe.Pointer(placeholder)))
+-	runtime.KeepAlive(placeholder)
+-	g.server = control("EDIT", g.owner.play.settings.Game.Server, 1, 42, 174, 496, 28, 4, lobbyBody2, 0x10080)
+-	call(chatSend, g.server, 0x00C5, 240, 0)
+-	g.probeButton = button("刷新", 17, 444, 120, 104, 30, 5, "quiet")
+-	button("加入房间", 11, 248, 454, 300, 40, 5, "primary")
+-	button("创建房间", 10, 584, 350, 284, 44, 5, "primary")
+-	button("准备", 12, 584, 350, 284, 44, 5, "primary")
+-	button("再来一局", 13, 584, 350, 284, 44, 5, "primary")
+-	button("复制房间码", 23, 584, 406, 136, 34, 5, "quiet")
+-	button("离开", 24, 732, 406, 136, 34, 5, "quiet")
+-	button("网络权限", 19, 584, 458, 284, 34, 5, "quiet")
+ 	g.difficulty = button("普通", 20, 32, 180, 236, 40, 2, "secondary")
+ 	g.volume = control("msctls_trackbar32", "音量", 21, 312, 184, 236, 30, 2, lobbyBody2, 0x10000)
+ 	g.effects = control("msctls_trackbar32", "特效", 22, 592, 184, 276, 30, 2, lobbyBody2, 0x10000)
+@@ -167,9 +146,8 @@
  		return fmt.Errorf("lobby frame allocation failed")
  	}
  	g.ensureAnim()
@@ -1187,7 +1234,18 @@ diff -ruN --exclude=.git upstream/cmd/codexpet/fight_lobby_layout_windows.go arm
  	g.startLobbyClock()
  	return nil
  }
-@@ -275,10 +273,6 @@
+@@ -203,6 +181,10 @@
+ 	if g.skin == nil {
+ 		return
+ 	}
++	// 联机页已移除，0 号页没有控件了，一律落到设置页。
++	if page == 0 {
++		page = 1
++	}
+ 	g.skin.page = page
+ 	g.skin.navTargetY = g.navYForPage(page)
+ 	g.manual = page == 2
+@@ -275,16 +257,12 @@
  			s.result, _ = combatResult(u.snapshot, u.localPlayer)
  			s.winner = u.snapshot.Winner
  		}
@@ -1198,7 +1256,26 @@ diff -ruN --exclude=.git upstream/cmd/codexpet/fight_lobby_layout_windows.go arm
  	}
  	if s.bindAction != "" && g.statusError == "" {
  		status = "设置\u201c" + g.keyNames[s.bindAction] + "\u201d：按新键 · Esc 取消"
-@@ -363,7 +357,7 @@
+ 	}
+ 	if status == "" {
+-		status = "创建或加入房间"
++		status = ""
+ 	}
+ 	if s.page == 1 && s.bindAction == "" && g.statusError == "" {
+ 		status = ""
+@@ -351,11 +329,6 @@
+ 		rematch = "等待好友"
+ 	}
+ 	g.updateLabel(s.byID[13], rematch)
+-	if s.connecting {
+-		g.updateLabel(s.byID[10], "连接中…")
+-	} else {
+-		g.updateLabel(s.byID[10], "创建房间")
+-	}
+ 	for id, action := range g.keys {
+ 		label := fmt.Sprintf("%s   %s", g.keyNames[action], keyLabel(g.owner.play.settings.Game.Keys[action]))
+ 		if s.bindAction == action {
+@@ -363,7 +336,7 @@
  		}
  		g.updateLabel(g.keyHandles[id], label)
  	}
@@ -1207,8 +1284,35 @@ diff -ruN --exclude=.git upstream/cmd/codexpet/fight_lobby_layout_windows.go arm
  	if key != s.lastState {
  		s.lastState = key
  		call(skinInvalidate, g.hwnd, 0, 0)
+diff -ruN --exclude=.git upstream/cmd/codexpet/fight_lobby_paint_windows.go arm64/cmd/codexpet/fight_lobby_paint_windows.go
+--- upstream/cmd/codexpet/fight_lobby_paint_windows.go	2026-11-11 02:13:55
++++ arm64/cmd/codexpet/fight_lobby_paint_windows.go	2026-11-11 02:13:55
+@@ -125,7 +125,7 @@
+ 	g.forgetFont()
+ 	g.paintRailPond(dc, 0)
+ 	g.lobbyText(dc, 104, 22, 164, 30, "奶蛙格斗", lobbyTitle, lobbyInk, dtSingle|dtVCenter)
+-	g.lobbyText(dc, 104, 56, 164, 18, "局域网对战", lobbyCap, lobbyMuted, dtSingle)
++	g.lobbyText(dc, 104, 56, 164, 18, "单机对战", lobbyCap, lobbyMuted, dtSingle)
+ 	switch g.skin.page {
+ 	case 1:
+ 		g.paintSettingsText(dc)
+@@ -160,13 +160,11 @@
+ 		g.lobbyText(dc, 32, 258, 516, 28, "暂无房间", lobbyNum, lobbyInk, dtCenter|dtSingle|dtVCenter)
+ 		g.lobbyText(dc, 32, 298, 516, 20, "让好友建房，或自己创建", lobbyCap, lobbyMuted, dtCenter|dtSingle)
+ 	}
+-	g.lobbyText(dc, 32, 430, 180, 18, "房间码", lobbyCap, lobbyMuted, dtSingle)
+ }
+ func (g *gamePanel) paintAdvancedText(dc uintptr) {
+ 	g.lobbyText(dc, 32, 126, 516, 24, "服务器地址", lobbySec, lobbyInk, dtSingle)
+-	g.lobbyText(dc, 32, 236, 208, 18, "房间码", lobbyCap, lobbyMuted, dtSingle)
+ 	g.lobbyText(dc, 32, 318, 516, 20, "host:port  /  tls://host:port", lobbyCap, lobbyMuted, dtSingle)
+-	g.lobbyText(dc, 32, 424, 516, 24, "同一 Wi-Fi 对战，请用「联机」", lobbyCap, lobbyMuted, dtSingle)
++	g.lobbyText(dc, 32, 424, 516, 24, "本机单机对战，支持键盘操控", lobbyCap, lobbyMuted, dtSingle)
+ }
+ func (g *gamePanel) paintSettingsText(dc uintptr) {
+ 	game := g.owner.play.settings.Game
 diff -ruN --exclude=.git upstream/cmd/codexpet/fight_lobby_stability_windows_test.go arm64/cmd/codexpet/fight_lobby_stability_windows_test.go
---- upstream/cmd/codexpet/fight_lobby_stability_windows_test.go	2026-11-10 00:37:17
+--- upstream/cmd/codexpet/fight_lobby_stability_windows_test.go	2026-11-11 02:13:55
 +++ arm64/cmd/codexpet/fight_lobby_stability_windows_test.go	1970-01-01 08:00:00
 @@ -1,155 +0,0 @@
 -//go:build windows
@@ -1367,7 +1471,7 @@ diff -ruN --exclude=.git upstream/cmd/codexpet/fight_lobby_stability_windows_tes
 -	}
 -}
 diff -ruN --exclude=.git upstream/cmd/codexpet/fight_lobby_windows_test.go arm64/cmd/codexpet/fight_lobby_windows_test.go
---- upstream/cmd/codexpet/fight_lobby_windows_test.go	2026-11-10 00:37:17
+--- upstream/cmd/codexpet/fight_lobby_windows_test.go	2026-11-11 02:13:55
 +++ arm64/cmd/codexpet/fight_lobby_windows_test.go	1970-01-01 08:00:00
 @@ -1,241 +0,0 @@
 -//go:build windows
@@ -1612,8 +1716,8 @@ diff -ruN --exclude=.git upstream/cmd/codexpet/fight_lobby_windows_test.go arm64
 -	t.Log("native pages rendered; real TCP room joined and readied; binding, slider, DPI reflow and close checked")
 -}
 diff -ruN --exclude=.git upstream/cmd/codexpet/fight_panel_windows.go arm64/cmd/codexpet/fight_panel_windows.go
---- upstream/cmd/codexpet/fight_panel_windows.go	2026-11-10 00:37:17
-+++ arm64/cmd/codexpet/fight_panel_windows.go	2026-11-10 00:37:17
+--- upstream/cmd/codexpet/fight_panel_windows.go	2026-11-11 02:13:55
++++ arm64/cmd/codexpet/fight_panel_windows.go	2026-11-11 02:13:55
 @@ -6,13 +6,11 @@
  	"context"
  	"fmt"
@@ -1637,7 +1741,27 @@ diff -ruN --exclude=.git upstream/cmd/codexpet/fight_panel_windows.go arm64/cmd/
  	roomListKey                                             string
  	searchResults                                           chan lanSearchResult
  	searchCancel                                            context.CancelFunc
-@@ -250,38 +248,12 @@
+@@ -192,7 +190,7 @@
+ 	s := p.settings.Game
+ 	level := map[play.AIDifficulty]string{play.EasyAI: "简单", play.NormalAI: "普通", play.HardAI: "困难"}[s.Difficulty]
+ 	g.updateLabel(g.difficulty, level+"  ›")
+-	status := "创建房间，或加入好友"
++	status := "单机挑战"
+ 	if !g.manual && g.listInitialized && len(g.rooms) == 0 {
+ 		status = "暂无房间，可先创建"
+ 		if g.searching {
+@@ -222,9 +220,7 @@
+ 				if result == "" {
+ 					result = "对局结束"
+ 				}
+-				status = result + " · 再来一局"
+-			default:
+-				status = "已加入房间"
++				status = result
+ 			}
+ 		}
+ 		if u.networkDetail != "" {
+@@ -250,38 +246,12 @@
  	g.labels[hwnd] = text
  	setText(hwnd, text)
  }
@@ -1676,7 +1800,7 @@ diff -ruN --exclude=.git upstream/cmd/codexpet/fight_panel_windows.go arm64/cmd/
  	case 25:
  		p.settings.Game.Keys = play.DefaultGameSettings().Keys
  		p.save()
-@@ -290,47 +262,6 @@
+@@ -290,47 +260,6 @@
  		if room, ok := g.selectedLANRoom(); ok {
  			setText(g.code, room.Code)
  		}
@@ -1724,7 +1848,7 @@ diff -ruN --exclude=.git upstream/cmd/codexpet/fight_panel_windows.go arm64/cmd/
  	case 14:
  		a.endFight()
  		a.startFight()
-@@ -445,24 +376,6 @@
+@@ -445,24 +374,6 @@
  	}
  }
  
@@ -1749,10 +1873,21 @@ diff -ruN --exclude=.git upstream/cmd/codexpet/fight_panel_windows.go arm64/cmd/
  func gamePanelProc(hwnd uintptr, msg uint32, wparam, lparam uintptr) uintptr {
  	if msg == 0x0081 && lparam != 0 { // WM_NCCREATE, CREATESTRUCTW.lpCreateParams
  		parameter := *(*uintptr)(unsafe.Pointer(lparam))
+diff -ruN --exclude=.git upstream/cmd/codexpet/host_windows.go arm64/cmd/codexpet/host_windows.go
+--- upstream/cmd/codexpet/host_windows.go	2026-11-11 02:13:55
++++ arm64/cmd/codexpet/host_windows.go	2026-11-11 02:13:55
+@@ -416,6 +416,7 @@
+ }
+ func (a *desktopHost) rectangle() rectJSON { return rectJSON{a.x, a.y, a.w, a.h} }
+ func (a *desktopHost) tick() error {
++	beat()
+ 	now := a.now()
+ 	if companionService != nil && companionService.Sharing().Allowed {
+ 		rememberForeground()
 diff -ruN --exclude=.git upstream/cmd/codexpet/main.go arm64/cmd/codexpet/main.go
---- upstream/cmd/codexpet/main.go	2026-11-10 00:37:17
-+++ arm64/cmd/codexpet/main.go	2026-11-10 00:37:17
-@@ -1,9 +1,11 @@
+--- upstream/cmd/codexpet/main.go	2026-11-11 02:13:55
++++ arm64/cmd/codexpet/main.go	2026-11-11 02:13:55
+@@ -1,13 +1,17 @@
  package main
  
  import (
@@ -1763,8 +1898,14 @@ diff -ruN --exclude=.git upstream/cmd/codexpet/main.go arm64/cmd/codexpet/main.g
 +	"net/http"
  	"os"
  	"path/filepath"
++	"strconv"
  	"runtime/debug"
-@@ -26,10 +28,8 @@
+ 	"strings"
++	"sync/atomic"
+ 	"time"
+ 
+ 	"codexpet/reconstruction/companion"
+@@ -26,10 +30,8 @@
  
  var combatSmokeReport string
  var combatSmokeSeconds float64
@@ -1776,7 +1917,71 @@ diff -ruN --exclude=.git upstream/cmd/codexpet/main.go arm64/cmd/codexpet/main.g
  
  var combatRulesPath string
  
-@@ -143,19 +143,39 @@
+@@ -101,7 +103,55 @@
+ 
+ // traceStartup persists milestones even when the GUI subsystem has no console.
+ // No screenshots, API keys or private data are collected.
++// 心跳：主循环每帧、启动各阶段都会刷新。卡死时看门狗据此判定。
++var heartbeat atomic.Int64
++var lastBeatFile atomic.Int64
++
++// heartbeatFile 放在 exe 同级的 .heartbeat，启动器（bash）直接看它的 mtime。
++// 进程级死锁时 Go 的 goroutine 也叫不醒，所以必须留一个外部可读的信号。
++func heartbeatFile() string {
++	exe, err := os.Executable()
++	if err != nil {
++		return ""
++	}
++	return filepath.Join(filepath.Dir(exe), ".heartbeat")
++}
++
++func beat() {
++	now := time.Now().UnixNano()
++	heartbeat.Store(now)
++	if now-lastBeatFile.Load() > int64(2*time.Second) {
++		lastBeatFile.Store(now)
++		if path := heartbeatFile(); path != "" {
++			_ = os.WriteFile(path, []byte(time.Now().Format(time.RFC3339Nano)), 0o600)
++		}
++	}
++}
++
++// watchStall 在进程内盯心跳。Wine 下偶发 Win32 调用不返回（主线程卡住但
++// 其他 goroutine 仍能跑），这时主动退出让启动器重开，比挂在那里强。
++func watchStall() {
++	limit := 90 * time.Second
++	if v := os.Getenv("NAIWA_STALL_SECONDS"); v != "" {
++		if n, err := strconv.Atoi(v); err == nil && n >= 15 {
++			limit = time.Duration(n) * time.Second
++		}
++	}
++	beat()
++	go func() {
++		for {
++			time.Sleep(10 * time.Second)
++			gap := time.Since(time.Unix(0, heartbeat.Load()))
++			if gap > limit {
++				_, _ = logDiagnostic(fmt.Errorf("watchdog: 主循环 %.0f 秒没有新帧，退出等待重启（限制 %.0f 秒）", gap.Seconds(), limit.Seconds()))
++				os.Exit(3)
++			}
++		}
++	}()
++}
++
+ func traceStartup(stage string) {
++	beat()
+ 	_, _ = logDiagnostic(fmt.Errorf("[%s] STARTUP_TRACE %s", time.Now().Format(time.RFC3339Nano), stage))
+ }
+ 
+@@ -117,6 +167,7 @@
+ 			os.Exit(1)
+ 		}
+ 	}()
++	watchStall()
+ 	traceStartup("release v13 native conversation and emotion controller: process entered main")
+ 	if err := entry(); err != nil {
+ 		traceStartup("entry returned error: " + err.Error())
+@@ -143,19 +194,39 @@
  	flag.BoolVar(&tidyOnLaunch, "tidy-demo", false, "start a tidy shortly after start-up")
  	flag.BoolVar(&fightOnLaunch, "fight-demo", false, "start an arena bout the pet fights by itself")
  	flag.BoolVar(&combatLaunch, "fight", false, "start an interactive single-player challenge")
@@ -1821,8 +2026,8 @@ diff -ruN --exclude=.git upstream/cmd/codexpet/main.go arm64/cmd/codexpet/main.g
  	}
  	if combatSkillAssets != "" {
 diff -ruN --exclude=.git upstream/cmd/codexpet/play_windows.go arm64/cmd/codexpet/play_windows.go
---- upstream/cmd/codexpet/play_windows.go	2026-11-10 00:37:17
-+++ arm64/cmd/codexpet/play_windows.go	2026-11-10 00:37:17
+--- upstream/cmd/codexpet/play_windows.go	2026-11-11 02:13:55
++++ arm64/cmd/codexpet/play_windows.go	2026-11-11 02:13:55
 @@ -401,9 +401,7 @@
  				return true
  			}
@@ -1867,7 +2072,7 @@ diff -ruN --exclude=.git upstream/cmd/codexpet/play_windows.go arm64/cmd/codexpe
  	if single {
  		label = "继续单机挑战"
 diff -ruN --exclude=.git upstream/cmd/codexpet/scroll_repaint_windows_test.go arm64/cmd/codexpet/scroll_repaint_windows_test.go
---- upstream/cmd/codexpet/scroll_repaint_windows_test.go	2026-11-10 00:37:17
+--- upstream/cmd/codexpet/scroll_repaint_windows_test.go	2026-11-11 02:13:55
 +++ arm64/cmd/codexpet/scroll_repaint_windows_test.go	1970-01-01 08:00:00
 @@ -1,98 +0,0 @@
 -//go:build windows
@@ -1969,7 +2174,7 @@ diff -ruN --exclude=.git upstream/cmd/codexpet/scroll_repaint_windows_test.go ar
 -	}
 -}
 diff -ruN --exclude=.git upstream/cmd/fightserver/main.go arm64/cmd/fightserver/main.go
---- upstream/cmd/fightserver/main.go	2026-11-10 00:37:17
+--- upstream/cmd/fightserver/main.go	2026-11-11 02:13:55
 +++ arm64/cmd/fightserver/main.go	1970-01-01 08:00:00
 @@ -1,75 +0,0 @@
 -package main
@@ -2048,8 +2253,8 @@ diff -ruN --exclude=.git upstream/cmd/fightserver/main.go arm64/cmd/fightserver/
 -	}
 -}
 diff -ruN --exclude=.git upstream/companion/server.go arm64/companion/server.go
---- upstream/companion/server.go	2026-11-10 00:37:17
-+++ arm64/companion/server.go	2026-11-10 00:37:17
+--- upstream/companion/server.go	2026-11-11 02:13:55
++++ arm64/companion/server.go	2026-11-11 02:13:55
 @@ -15,6 +15,7 @@
  	"net"
  	"net/http"
@@ -2085,7 +2290,7 @@ diff -ruN --exclude=.git upstream/companion/server.go arm64/companion/server.go
  	mux := http.NewServeMux()
  	mux.HandleFunc("GET /", s.page)
 diff -ruN --exclude=.git upstream/fightnet/client.go arm64/fightnet/client.go
---- upstream/fightnet/client.go	2026-11-10 00:37:17
+--- upstream/fightnet/client.go	2026-11-11 02:13:55
 +++ arm64/fightnet/client.go	1970-01-01 08:00:00
 @@ -1,272 +0,0 @@
 -package fightnet
@@ -2361,7 +2566,7 @@ diff -ruN --exclude=.git upstream/fightnet/client.go arm64/fightnet/client.go
 -}
 -func mathDistance(x, y, a, b float64) float64 { dx, dy := x-a, y-b; return dx*dx + dy*dy }
 diff -ruN --exclude=.git upstream/fightnet/lan.go arm64/fightnet/lan.go
---- upstream/fightnet/lan.go	2026-11-10 00:37:17
+--- upstream/fightnet/lan.go	2026-11-11 02:13:55
 +++ arm64/fightnet/lan.go	1970-01-01 08:00:00
 @@ -1,208 +0,0 @@
 -package fightnet
@@ -2573,7 +2778,7 @@ diff -ruN --exclude=.git upstream/fightnet/lan.go arm64/fightnet/lan.go
 -	}
 -}
 diff -ruN --exclude=.git upstream/fightnet/lan_direct.go arm64/fightnet/lan_direct.go
---- upstream/fightnet/lan_direct.go	2026-11-10 00:37:17
+--- upstream/fightnet/lan_direct.go	2026-11-11 02:13:55
 +++ arm64/fightnet/lan_direct.go	1970-01-01 08:00:00
 @@ -1,185 +0,0 @@
 -package fightnet
@@ -2762,7 +2967,7 @@ diff -ruN --exclude=.git upstream/fightnet/lan_direct.go arm64/fightnet/lan_dire
 -	}
 -}
 diff -ruN --exclude=.git upstream/fightnet/lan_discover.go arm64/fightnet/lan_discover.go
---- upstream/fightnet/lan_discover.go	2026-11-10 00:37:17
+--- upstream/fightnet/lan_discover.go	2026-11-11 02:13:55
 +++ arm64/fightnet/lan_discover.go	1970-01-01 08:00:00
 @@ -1,140 +0,0 @@
 -package fightnet
@@ -2906,7 +3111,7 @@ diff -ruN --exclude=.git upstream/fightnet/lan_discover.go arm64/fightnet/lan_di
 -	}
 -}
 diff -ruN --exclude=.git upstream/fightnet/lan_test.go arm64/fightnet/lan_test.go
---- upstream/fightnet/lan_test.go	2026-11-10 00:37:17
+--- upstream/fightnet/lan_test.go	2026-11-11 02:13:55
 +++ arm64/fightnet/lan_test.go	1970-01-01 08:00:00
 @@ -1,129 +0,0 @@
 -package fightnet
@@ -3039,7 +3244,7 @@ diff -ruN --exclude=.git upstream/fightnet/lan_test.go arm64/fightnet/lan_test.g
 -	}
 -}
 diff -ruN --exclude=.git upstream/fightnet/network_test.go arm64/fightnet/network_test.go
---- upstream/fightnet/network_test.go	2026-11-10 00:37:17
+--- upstream/fightnet/network_test.go	2026-11-11 02:13:55
 +++ arm64/fightnet/network_test.go	1970-01-01 08:00:00
 @@ -1,335 +0,0 @@
 -package fightnet
@@ -3378,7 +3583,7 @@ diff -ruN --exclude=.git upstream/fightnet/network_test.go arm64/fightnet/networ
 -	}
 -}
 diff -ruN --exclude=.git upstream/fightnet/probe.go arm64/fightnet/probe.go
---- upstream/fightnet/probe.go	2026-11-10 00:37:17
+--- upstream/fightnet/probe.go	2026-11-11 02:13:55
 +++ arm64/fightnet/probe.go	1970-01-01 08:00:00
 @@ -1,70 +0,0 @@
 -package fightnet
@@ -3452,7 +3657,7 @@ diff -ruN --exclude=.git upstream/fightnet/probe.go arm64/fightnet/probe.go
 -	return ProbeResult{Version: update.Version, RoundTrip: time.Since(started)}, nil
 -}
 diff -ruN --exclude=.git upstream/fightnet/protocol.go arm64/fightnet/protocol.go
---- upstream/fightnet/protocol.go	2026-11-10 00:37:17
+--- upstream/fightnet/protocol.go	2026-11-11 02:13:55
 +++ arm64/fightnet/protocol.go	1970-01-01 08:00:00
 @@ -1,33 +0,0 @@
 -// Package fightnet implements room-isolated, server-authoritative combat.
@@ -3489,7 +3694,7 @@ diff -ruN --exclude=.git upstream/fightnet/protocol.go arm64/fightnet/protocol.g
 -	Snapshot  *play.CombatSnapshot `json:"snapshot,omitempty"`
 -}
 diff -ruN --exclude=.git upstream/fightnet/result_test.go arm64/fightnet/result_test.go
---- upstream/fightnet/result_test.go	2026-11-10 00:37:17
+--- upstream/fightnet/result_test.go	2026-11-11 02:13:55
 +++ arm64/fightnet/result_test.go	1970-01-01 08:00:00
 @@ -1,48 +0,0 @@
 -package fightnet
@@ -3541,7 +3746,7 @@ diff -ruN --exclude=.git upstream/fightnet/result_test.go arm64/fightnet/result_
 -	}
 -}
 diff -ruN --exclude=.git upstream/fightnet/server.go arm64/fightnet/server.go
---- upstream/fightnet/server.go	2026-11-10 00:37:17
+--- upstream/fightnet/server.go	2026-11-11 02:13:55
 +++ arm64/fightnet/server.go	1970-01-01 08:00:00
 @@ -1,497 +0,0 @@
 -package fightnet
@@ -4042,7 +4247,7 @@ diff -ruN --exclude=.git upstream/fightnet/server.go arm64/fightnet/server.go
 -func (s *Server) RoomCount() int { s.mu.Lock(); defer s.mu.Unlock(); return len(s.rooms) }
 -func (s *Server) String() string { return fmt.Sprintf("NaiWa fight protocol %d", ProtocolVersion) }
 diff -ruN --exclude=.git upstream/fightnet/session_stability_test.go arm64/fightnet/session_stability_test.go
---- upstream/fightnet/session_stability_test.go	2026-11-10 00:37:17
+--- upstream/fightnet/session_stability_test.go	2026-11-11 02:13:55
 +++ arm64/fightnet/session_stability_test.go	1970-01-01 08:00:00
 @@ -1,86 +0,0 @@
 -package fightnet
