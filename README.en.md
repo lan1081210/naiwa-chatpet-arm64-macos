@@ -66,14 +66,19 @@ What the patch changes:
 - `companion/server.go`: adds `NAIWA_BASE_URL` / `NAIWA_MODEL` / `NAIWA_API_KEY`, pointing the pet at the local bridge on startup
 - `main.go`: adds `-chat-ping "text"` to check the chat path in one command
 
-## Stall recovery
+## Stalls: root cause and two layers
 
 MetalSharp's arm64 Wine deadlocks occasionally: the window stays, clicks do nothing, CPU drops to 1%,
 and `sample` shows every thread parked on Wine's `msync` locks. The same exe built for x86_64 runs fine
 under Wine Staging via Rosetta, so it is a synchronisation defect in the arm64 runtime — both the tar.xz
 and the signed `.app` builds show it.
 
-The app therefore writes `Source/NaiWaChatPet/.heartbeat` every 2 s; the launcher checks it every 5 s and,
+**Primary fix:** the launcher sets `WINEMSYNC=0`, disabling Wine's msync fast path in favour of
+server-side synchronisation. With it, one instance ran 11 minutes without a stall (before: every 1–3
+minutes). The upstream peer heartbeat (a file write every 200 ms, a directory scan every 140 ms) is also
+off by default — set `NAIWA_PEERS=on` to re-enable.
+
+**Fallback:** the app keeps `Source/NaiWaChatPet/.heartbeat` every 2 s; the launcher checks it every 5 s and,
 after 40 s of staleness, kills the process, runs `wineserver -k` and restarts (at most 5 times), logging to
 `/tmp/naiwa-launcher.log`. An in-process 90 s watchdog calls `os.Exit(3)` as a second line of defence.
 Measured recovery: 41 s.
