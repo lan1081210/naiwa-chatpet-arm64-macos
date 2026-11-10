@@ -15,15 +15,16 @@ Only the adaptation layer lives here — launcher, bridge, patch, docs. The pet 
 | Item | State |
 |---|---|
 | Pet itself (animation, expressions, drag, context menu) | Runs on Mac, rendering confirmed by screenshot |
+| Stall recovery | Heartbeat file + launcher watchdog; recovered 41 s after a real freeze |
 | Keyboard control, walk/jump, fly swat, focus timer | Works |
-| Single-player challenge | Kept |
-| Online (rooms, LAN, lobby, reconnect) | Removed |
+| Single-player challenge | Kept; smoke report: 3 lifecycle cycles, 479 frames, 12 FPS, no GDI handle leak |
+| Online (rooms, LAN, lobby, reconnect) | Removed; the panel keeps only Settings and Advanced |
 | Chat to local Hermes | Verified through `-chat-ping`, bridge log shows the request |
 
 ## Quick start
 
 ```sh
-# 1) Install arm64 Wine (MetalSharp 6.0, ~918 MB archive)
+# 1) Install arm64 Wine (MetalSharp 6.0, signed MetalSharp-Wine-6.0-arm64.zip, 1.36 GB)
 #    https://github.com/metalsharp/MetalSharp-Wine/releases
 #    Extract to ~/Projects/NaiWaChatPet/wine-arm64/ ; single connections are
 #    throttled (~200 KB/s), parallel ranges are much faster — see scripts/fetch-wine.sh
@@ -64,6 +65,18 @@ What the patch changes:
 - Lobby loses the online page and keeps settings/advanced; the context menu loses its online entry
 - `companion/server.go`: adds `NAIWA_BASE_URL` / `NAIWA_MODEL` / `NAIWA_API_KEY`, pointing the pet at the local bridge on startup
 - `main.go`: adds `-chat-ping "text"` to check the chat path in one command
+
+## Stall recovery
+
+MetalSharp's arm64 Wine deadlocks occasionally: the window stays, clicks do nothing, CPU drops to 1%,
+and `sample` shows every thread parked on Wine's `msync` locks. The same exe built for x86_64 runs fine
+under Wine Staging via Rosetta, so it is a synchronisation defect in the arm64 runtime — both the tar.xz
+and the signed `.app` builds show it.
+
+The app therefore writes `Source/NaiWaChatPet/.heartbeat` every 2 s; the launcher checks it every 5 s and,
+after 40 s of staleness, kills the process, runs `wineserver -k` and restarts (at most 5 times), logging to
+`/tmp/naiwa-launcher.log`. An in-process 90 s watchdog calls `os.Exit(3)` as a second line of defence.
+Measured recovery: 41 s.
 
 ## Bridge
 
