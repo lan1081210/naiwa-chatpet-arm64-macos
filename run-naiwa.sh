@@ -15,6 +15,7 @@ else
     WINESERVER="$BASE/wine-arm64/metalsharp-wine-6.0-arm64/bin/wineserver"
 fi
 
+export WINEMSYNC=0
 export WINEPREFIX="$BASE/prefix-arm64"
 # 聊天走本机 Hermes 桥（~/.hermes/scripts/naiwa-hermes-bridge.py，默认 8799）
 export NAIWA_BASE_URL="${NAIWA_BASE_URL:-http://127.0.0.1:8799}"
