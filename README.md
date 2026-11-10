@@ -68,15 +68,18 @@ python3 scripts/naiwa-hermes-bridge.py &
 - `companion/server.go`：加 `NAIWA_BASE_URL` / `NAIWA_MODEL` / `NAIWA_API_KEY` 环境变量，启动时直接指向本机桥
 - `main.go`：加 `-chat-ping "文本"`，一条命令验证聊天链路
 
-## 卡死自恢复
+## 卡死：根因与两层处理
 
-MetalSharp 的 arm64 Wine 会偶发进程级死锁：窗口还在、点不动、CPU 掉到 1%，`sample` 里线程全堵在
-Wine 的 `msync` 锁上。同一个 exe 编成 x86_64 跑 Wine Staging（Rosetta）就没这问题 —— 是 arm64 Wine
-自己的同步缺陷，解压版和签名版都中。
+MetalSharp 的 arm64 Wine 会偶发进程级死锁：窗口还在、点不动、CPU 掉到 1%。`WINEDEBUG=+server,+sync`
+抓现场能看到两个线程在 `register_msync_wait` / `unregister_msync_wait` 里空转 —— 是它的 msync 快同步
+实现有缺陷。同一个 exe 编成 x86_64 跑 Wine Staging（Rosetta）完全正常，解压版和签名版 `.app` 都会中招。
 
-所以程序每 2 秒写 `Source/NaiWaChatPet/.heartbeat`，启动器每 5 秒看一眼，超 40 秒就 `kill -9`、`wineserver -k`、
-重开（最多 5 次），记录写 `/tmp/naiwa-launcher.log`。程序里另有一个 90 秒的内部看门狗 `os.Exit(3)` 兜底。
-实测从卡死到恢复约 41 秒。
+**主修法**：启动器里 `export WINEMSYNC=0`，关掉 msync 退回服务器端同步。实测同一实例连跑 11 分钟零卡死
+（改之前 1–3 分钟一次）。原版的同伴同步每 200 ms 写文件、每 140 ms 扫目录也一并默认关掉（`NAIWA_PEERS=on` 才开）。
+
+**兜底**：程序每秒在内存打点、后台 goroutine 落盘 `Source/NaiWaChatPet/.heartbeat`，启动器每 5 秒读一次文件内容（不是 mtime），超 40 秒就 `kill -9`、
+`wineserver -k`、重开（最多 5 次），记录写 `/tmp/naiwa-launcher.log`。程序里另有 90 秒的内部看门狗兜底。
+实测真卡死时 41 秒自愈。
 
 ## Hermes 桥
 
